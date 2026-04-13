@@ -1,6 +1,6 @@
 # MqttBox
 
-MqttBox is a desktop MQTT debugging tool built with `React + TypeScript + Tauri + Rust`.
+MqttBox is a desktop MQTT debugging client built with `React + TypeScript + Tauri + Rust`, focused on broker management, topic subscriptions, message history, and payload parsing.
 
 The current app already includes:
 

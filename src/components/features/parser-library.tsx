@@ -160,111 +160,121 @@ export function ParserLibrary() {
 
       <div className="parser-library-editor">
         <section className="parser-library-section">
-          <div className="parser-library-grid">
-            <div className="parser-library-field">
-              <Label htmlFor="parser-name">{t("parsers.name")}</Label>
-              <Input
-                id="parser-name"
-                value={draft.name}
-                onChange={(event) => {
-                  const value = event.currentTarget.value;
-                  setDraft((current) => ({
-                    ...current,
-                    name: value,
-                  }));
-                }}
-              />
-            </div>
-          </div>
+          <div className="parser-library-edit-layout">
+            <div className="parser-library-edit-main">
+              <div className="parser-library-grid">
+                <div className="parser-library-field">
+                  <Label htmlFor="parser-name">{t("parsers.name")}</Label>
+                  <Input
+                    id="parser-name"
+                    value={draft.name}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setDraft((current) => ({
+                        ...current,
+                        name: value,
+                      }));
+                    }}
+                  />
+                </div>
+              </div>
 
-          <div className="parser-library-field">
-            <Label htmlFor="parser-script">{t("parsers.script")}</Label>
-            <ParserScriptEditor
-              value={draft.script}
-              onChange={(value) => {
-                setDraft((current) => ({
-                  ...current,
-                  script: value,
-                }));
-              }}
-            />
-          </div>
+              <div className="parser-library-field">
+                <Label htmlFor="parser-script">{t("parsers.script")}</Label>
+                <ParserScriptEditor
+                  value={draft.script}
+                  onChange={(value) => {
+                    setDraft((current) => ({
+                      ...current,
+                      script: value,
+                    }));
+                  }}
+                />
+              </div>
 
-          <div className="parser-library-helper-card">
-            <div className="parser-library-helper-header">
-              <div className="parser-library-section-title">{t("parsers.helpersTitle")}</div>
-              <div className="parser-library-helper-caption">
-                {t("parsers.helpersCaption")}
+              <div className="parser-library-actions">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isSaving || !draft.name.trim() || !draft.script.trim()}
+                  onClick={async () => {
+                    setIsSaving(true);
+                    try {
+                      const saved = await parserStore.saveParser({
+                        id: draft.id,
+                        name: draft.name.trim(),
+                        script: draft.script,
+                      });
+                      setSelectedParserId(saved.id);
+                      setDraft(createDraft(locale, saved));
+                      toast.success(t("toast.parserSaved"));
+                    } catch (error) {
+                      toast.error(
+                        error instanceof Error ? error.message : t("toast.operationFailed"),
+                      );
+                    } finally {
+                      setIsSaving(false);
+                    }
+                  }}
+                >
+                  {t("button.save")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={isDeleting || !draft.id}
+                  onClick={async () => {
+                    if (!draft.id) {
+                      return;
+                    }
+
+                    setIsDeleting(true);
+                    try {
+                      await parserStore.removeParser(draft.id);
+                      if (activeConnectionId) {
+                        await loadSubscriptions(activeConnectionId);
+                      }
+                      setSelectedParserId("new");
+                      setDraft(createDraft(locale));
+                      setTestResult(null);
+                      toast.success(t("toast.parserRemoved"));
+                    } catch (error) {
+                      toast.error(
+                        error instanceof Error ? error.message : t("toast.operationFailed"),
+                      );
+                    } finally {
+                      setIsDeleting(false);
+                    }
+                  }}
+                >
+                  <Trash2 className="size-3.5" />
+                  {t("button.deleteParser")}
+                </Button>
               </div>
             </div>
-            <div className="parser-library-helper-list">
-              {parserHelpers.map((helper) => (
-                <div key={helper.name} className="parser-library-helper-item">
-                  <div className="parser-library-helper-signature mono">
-                    {`helpers.${helper.signature}`}
+
+            <aside className="parser-library-helper-rail">
+              <div className="parser-library-helper-card">
+                <div className="parser-library-helper-header">
+                  <div className="parser-library-section-title">{t("parsers.helpersTitle")}</div>
+                  <div className="parser-library-helper-caption">
+                    {t("parsers.helpersCaption")}
                   </div>
-                  <div className="parser-library-helper-detail">{helper.detail}</div>
-                  <div className="parser-library-helper-detail">{helper.documentation}</div>
-                  <div className="parser-library-helper-example mono">{helper.example}</div>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="parser-library-actions">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={isSaving || !draft.name.trim() || !draft.script.trim()}
-              onClick={async () => {
-                setIsSaving(true);
-                try {
-                  const saved = await parserStore.saveParser({
-                    id: draft.id,
-                    name: draft.name.trim(),
-                    script: draft.script,
-                  });
-                  setSelectedParserId(saved.id);
-                  setDraft(createDraft(locale, saved));
-                  toast.success(t("toast.parserSaved"));
-                } catch (error) {
-                  toast.error(error instanceof Error ? error.message : t("toast.operationFailed"));
-                } finally {
-                  setIsSaving(false);
-                }
-              }}
-            >
-              {t("button.save")}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={isDeleting || !draft.id}
-              onClick={async () => {
-                if (!draft.id) {
-                  return;
-                }
-
-                setIsDeleting(true);
-                try {
-                  await parserStore.removeParser(draft.id);
-                  if (activeConnectionId) {
-                    await loadSubscriptions(activeConnectionId);
-                  }
-                  setSelectedParserId("new");
-                  setDraft(createDraft(locale));
-                  setTestResult(null);
-                  toast.success(t("toast.parserRemoved"));
-                } catch (error) {
-                  toast.error(error instanceof Error ? error.message : t("toast.operationFailed"));
-                } finally {
-                  setIsDeleting(false);
-                }
-              }}
-            >
-              <Trash2 className="size-3.5" />
-              {t("button.deleteParser")}
-            </Button>
+                <div className="parser-library-helper-list scrollbar-thin">
+                  {parserHelpers.map((helper) => (
+                    <div key={helper.name} className="parser-library-helper-item">
+                      <div className="parser-library-helper-signature mono">
+                        {`helpers.${helper.signature}`}
+                      </div>
+                      <div className="parser-library-helper-detail">{helper.detail}</div>
+                      <div className="parser-library-helper-detail">{helper.documentation}</div>
+                      <div className="parser-library-helper-example mono">{helper.example}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </aside>
           </div>
         </section>
 

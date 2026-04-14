@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { LocalePreference } from "@/lib/locale";
+import type { AgentEvent } from "@agent-contracts";
 
 import type {
   ConnectionFolderDto,
@@ -9,7 +10,11 @@ import type {
   ConnectionReorderItem,
   ConnectionSecretDto,
 } from "@/features/connections/types";
-import type { AgentContextDto, AgentToolDescriptor } from "@/features/agent/types";
+import type {
+  AgentContextDto,
+  AgentToolDescriptor,
+  LegacyAgentStatusEvent,
+} from "@/features/agent/types";
 import type {
   ExportRequest,
   MessageFilter,
@@ -33,6 +38,15 @@ export interface AppSettingsDto {
   locale: LocalePreference;
 }
 
+export interface AgentSettingsDto {
+  enabled: boolean;
+  provider: "openai";
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  serviceUrl: string;
+}
+
 export interface ConnectionTestResultDto {
   ok: boolean;
   message: string;
@@ -45,11 +59,10 @@ export interface ConnectionEventPayload {
   message?: string | null;
 }
 
-export interface AgentEventPayload {
-  message: string;
-}
+export type AgentEventPayload = LegacyAgentStatusEvent | AgentEvent;
 
 let cachedAppSettings: AppSettingsDto | null = null;
+let cachedAgentSettings: AgentSettingsDto | null = null;
 
 export async function listConnections() {
   return invoke<ConnectionProfileDto[]>("list_connections");
@@ -205,13 +218,28 @@ export async function getAppSettings() {
   return settings;
 }
 
+export async function getAgentSettings() {
+  const settings = await invoke<AgentSettingsDto>("get_agent_settings");
+  cachedAgentSettings = settings;
+  return settings;
+}
+
 export async function saveAppSettings(settings: AppSettingsDto) {
   await invoke<void>("save_app_settings", { settings });
   cachedAppSettings = settings;
 }
 
+export async function saveAgentSettings(settings: AgentSettingsDto) {
+  await invoke<void>("save_agent_settings", { settings });
+  cachedAgentSettings = settings;
+}
+
 export function peekCachedAppSettings() {
   return cachedAppSettings;
+}
+
+export function peekCachedAgentSettings() {
+  return cachedAgentSettings;
 }
 
 export async function updateAppSettings(patch: Partial<AppSettingsDto>) {

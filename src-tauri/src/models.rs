@@ -232,6 +232,30 @@ impl Default for AppSettingsDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentSettingsDto {
+    pub enabled: bool,
+    pub provider: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub service_url: String,
+}
+
+impl Default for AgentSettingsDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: String::new(),
+            model: "gpt-5.4".into(),
+            service_url: "http://127.0.0.1:8787".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentToolDescriptor {
     pub id: String,
     pub name: String,

@@ -5,7 +5,7 @@ use crate::{
     app_state::SharedState,
     error::AppError,
     models::{
-        AgentContextDto, AgentEventPayload, AgentToolDescriptor, AppSettingsDto,
+        AgentContextDto, AgentEventPayload, AgentSettingsDto, AgentToolDescriptor, AppSettingsDto,
         ConnectionEventPayload, ConnectionFolderDto, ConnectionProfileDto,
         ConnectionProfileInput, ConnectionReorderItem, ConnectionSecretDto,
         ConnectionTestResultDto, ExportRequest, MessageFilter, MessageHistoryPageDto,
@@ -582,6 +582,39 @@ pub fn get_app_settings(state: State<'_, SharedState>) -> Result<AppSettingsDto,
         .unwrap()
         .get_app_settings()
         .map_err(to_string)
+}
+
+#[tauri::command]
+pub fn get_agent_settings(state: State<'_, SharedState>) -> Result<AgentSettingsDto, String> {
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .get_agent_settings()
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub fn save_agent_settings(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    settings: AgentSettingsDto,
+) -> Result<(), String> {
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .save_agent_settings(&settings)
+        .map_err(to_string)?;
+
+    app.emit(
+        "agent://status",
+        AgentEventPayload {
+            message: "Agent settings updated".into(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

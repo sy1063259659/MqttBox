@@ -16,15 +16,19 @@ import {
 interface ParserStore {
   items: MessageParserDto[];
   isLoading: boolean;
+  draft: MessageParserInput | null;
   loadParsers: () => Promise<void>;
   saveParser: (input: MessageParserInput) => Promise<MessageParserDto>;
   removeParser: (parserId: string) => Promise<void>;
   testParser: (request: MessageParserTestRequest) => Promise<MessageParserTestResultDto>;
+  setDraft: (draft: MessageParserInput | null) => void;
+  clearDraft: () => void;
 }
 
 export const useParserStore = create<ParserStore>((set) => ({
   items: [],
   isLoading: false,
+  draft: null,
   async loadParsers() {
     set({ isLoading: true });
     const items = await listMessageParsers();
@@ -45,5 +49,11 @@ export const useParserStore = create<ParserStore>((set) => ({
   },
   async testParser(request) {
     return testMessageParser(request);
+  },
+  setDraft(draft) {
+    set({ draft });
+  },
+  clearDraft() {
+    set({ draft: null });
   },
 }));

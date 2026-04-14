@@ -11,10 +11,10 @@ use uuid::Uuid;
 use crate::{
     error::AppResult,
     models::{
-        AppSettingsDto, ConnectionFolderDto, ConnectionProfileDto, ConnectionProfileInput,
-        ConnectionReorderItem, ConnectionSecretDto, ExportRequest, MessageFilter,
-        MessageHistoryPageDto, MessageParserDto, MessageParserInput, MessageRecordDto,
-        SubscriptionDto, SubscriptionInput,
+        AgentSettingsDto, AppSettingsDto, ConnectionFolderDto, ConnectionProfileDto,
+        ConnectionProfileInput, ConnectionReorderItem, ConnectionSecretDto, ExportRequest,
+        MessageFilter, MessageHistoryPageDto, MessageParserDto, MessageParserInput,
+        MessageRecordDto, SubscriptionDto, SubscriptionInput,
     },
     parser::{build_payload_fields, execute_message_parser, pretty_json, MessageParserRuntimeInput},
 };
@@ -1091,6 +1091,52 @@ impl StorageService {
             ("timestampFormat", serde_json::to_string(&settings.timestamp_format)?),
             ("theme", serde_json::to_string(&settings.theme)?),
             ("locale", serde_json::to_string(&settings.locale)?),
+        ];
+
+        for (key, value) in items {
+            self.conn.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                params![key, value, now],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_agent_settings(&self) -> AppResult<AgentSettingsDto> {
+        let mut settings = AgentSettingsDto::default();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value_json FROM app_settings WHERE key LIKE 'agent%' ORDER BY key ASC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        for row in rows.flatten() {
+            match row.0.as_str() {
+                "agentEnabled" => settings.enabled = serde_json::from_str(&row.1)?,
+                "agentProvider" => settings.provider = serde_json::from_str(&row.1)?,
+                "agentBaseUrl" => settings.base_url = serde_json::from_str(&row.1)?,
+                "agentApiKey" => settings.api_key = serde_json::from_str(&row.1)?,
+                "agentModel" => settings.model = serde_json::from_str(&row.1)?,
+                "agentServiceUrl" => settings.service_url = serde_json::from_str(&row.1)?,
+                _ => {}
+            }
+        }
+
+        Ok(settings)
+    }
+
+    pub fn save_agent_settings(&self, settings: &AgentSettingsDto) -> AppResult<()> {
+        let now = now_ms();
+        let items = vec![
+            ("agentEnabled", serde_json::to_string(&settings.enabled)?),
+            ("agentProvider", serde_json::to_string(&settings.provider)?),
+            ("agentBaseUrl", serde_json::to_string(&settings.base_url)?),
+            ("agentApiKey", serde_json::to_string(&settings.api_key)?),
+            ("agentModel", serde_json::to_string(&settings.model)?),
+            ("agentServiceUrl", serde_json::to_string(&settings.service_url)?),
         ];
 
         for (key, value) in items {

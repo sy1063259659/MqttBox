@@ -7,8 +7,17 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { I18nProvider, useI18n } from "@/lib/i18n";
+import { getAgentServiceHealth, syncAgentServiceConfig } from "@/services/agent-service";
 import { closeCurrentWindow } from "@/services/window";
-import { peekCachedAppSettings, saveAppSettings, type AppSettingsDto } from "@/services/tauri";
+import {
+  getAgentSettings,
+  peekCachedAppSettings,
+  peekCachedAgentSettings,
+  saveAgentSettings,
+  saveAppSettings,
+  type AgentSettingsDto,
+  type AppSettingsDto,
+} from "@/services/tauri";
 
 const defaultSettings: AppSettingsDto = {
   activeConnectionId: null,
@@ -26,6 +35,15 @@ interface SettingsViewProps {
   standalone?: boolean;
 }
 
+const defaultAgentSettings: AgentSettingsDto = {
+  enabled: false,
+  provider: "openai",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "",
+  model: "gpt-5.4",
+  serviceUrl: "http://127.0.0.1:8787",
+};
+
 export function SettingsView({
   initialSettings,
   onClose,
@@ -34,11 +52,26 @@ export function SettingsView({
 }: SettingsViewProps) {
   const { t } = useI18n();
   const [settings, setSettings] = useState<AppSettingsDto>(initialSettings);
+  const [agentSettings, setAgentSettings] = useState<AgentSettingsDto>(
+    () => peekCachedAgentSettings() ?? defaultAgentSettings,
+  );
   const [isSaving, setIsSaving] = useState(false);
+  const [isCheckingAgent, setIsCheckingAgent] = useState(false);
+  const [agentHealth, setAgentHealth] = useState<string | null>(null);
 
   useEffect(() => {
     setSettings(initialSettings);
   }, [initialSettings]);
+
+  useEffect(() => {
+    void getAgentSettings()
+      .then((next) => {
+        setAgentSettings(next);
+      })
+      .catch(() => {
+        setAgentSettings(peekCachedAgentSettings() ?? defaultAgentSettings);
+      });
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme;
@@ -53,6 +86,8 @@ export function SettingsView({
     setIsSaving(true);
     try {
       await saveAppSettings(settings);
+      await saveAgentSettings(agentSettings);
+      await syncAgentServiceConfig(agentSettings);
       document.documentElement.dataset.theme = settings.theme;
       await onSaved?.(settings);
       toast.success(t("toast.settingsSaved"));
@@ -60,6 +95,28 @@ export function SettingsView({
       toast.error(error instanceof Error ? error.message : t("toast.settingsSaveFailed"));
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const checkAgentHealth = async () => {
+    setIsCheckingAgent(true);
+    try {
+      const health = await getAgentServiceHealth(agentSettings.serviceUrl);
+      const modelState = !health.model?.enabled
+        ? t("settings.agentStatus.disabled")
+        : !health.model.configured
+          ? t("settings.agentStatus.missingKey")
+          : t("settings.agentStatus.ready");
+      const status = `${modelState} · ${health.deepagentsRuntime} · ${health.model?.model ?? agentSettings.model}`;
+      setAgentHealth(status);
+      toast.success(t("toast.agentHealthChecked"));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : t("settings.agentStatus.unreachable");
+      setAgentHealth(message);
+      toast.error(message);
+    } finally {
+      setIsCheckingAgent(false);
     }
   };
 
@@ -151,6 +208,97 @@ export function SettingsView({
               type="checkbox"
             />
           </div>
+        </div>
+      </section>
+
+      <section className="settings-card">
+        <div className="settings-card-header">
+          <h1>{t("settings.agent")}</h1>
+        </div>
+        <div className="settings-grid">
+          <div className="settings-toggle">
+            <Label htmlFor="agent-enabled">{t("settings.agentEnabled")}</Label>
+            <input
+              id="agent-enabled"
+              checked={agentSettings.enabled}
+              onChange={(event) =>
+                setAgentSettings((current) => ({
+                  ...current,
+                  enabled: event.currentTarget.checked,
+                }))
+              }
+              type="checkbox"
+            />
+          </div>
+          <div>
+            <Label>{t("settings.agentProvider")}</Label>
+            <Select
+              value={agentSettings.provider}
+              onChange={(event) =>
+                setAgentSettings((current) => ({
+                  ...current,
+                  provider: event.currentTarget.value as AgentSettingsDto["provider"],
+                }))
+              }
+            >
+              <option value="openai">OpenAI</option>
+            </Select>
+          </div>
+          <div>
+            <Label>{t("settings.agentServiceUrl")}</Label>
+            <Input
+              value={agentSettings.serviceUrl}
+              onChange={(event) =>
+                setAgentSettings((current) => ({
+                  ...current,
+                  serviceUrl: event.currentTarget.value,
+                }))
+              }
+            />
+          </div>
+          <div>
+            <Label>{t("settings.agentBaseUrl")}</Label>
+            <Input
+              value={agentSettings.baseUrl}
+              onChange={(event) =>
+                setAgentSettings((current) => ({
+                  ...current,
+                  baseUrl: event.currentTarget.value,
+                }))
+              }
+            />
+          </div>
+          <div>
+            <Label>{t("settings.agentModel")}</Label>
+            <Input
+              value={agentSettings.model}
+              onChange={(event) =>
+                setAgentSettings((current) => ({
+                  ...current,
+                  model: event.currentTarget.value,
+                }))
+              }
+            />
+          </div>
+          <div>
+            <Label>{t("settings.agentApiKey")}</Label>
+            <Input
+              type="password"
+              value={agentSettings.apiKey}
+              onChange={(event) =>
+                setAgentSettings((current) => ({
+                  ...current,
+                  apiKey: event.currentTarget.value,
+                }))
+              }
+            />
+          </div>
+        </div>
+        <div className="mt-4 flex items-center gap-2">
+          <Button variant="outline" onClick={() => void checkAgentHealth()} disabled={isCheckingAgent}>
+            {isCheckingAgent ? t("settings.agentChecking") : t("settings.agentCheckHealth")}
+          </Button>
+          {agentHealth ? <span className="text-xs text-muted-foreground">{agentHealth}</span> : null}
         </div>
       </section>
 

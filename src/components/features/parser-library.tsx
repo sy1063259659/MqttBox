@@ -50,6 +50,8 @@ function createDraft(
 export function ParserLibrary() {
   const { locale, t } = useI18n();
   const parserStore = useParserStore();
+  const parserDraft = useParserStore((state) => state.draft);
+  const clearParserDraft = useParserStore((state) => state.clearDraft);
   const activeConnectionId = useConnectionStore((state) => state.activeConnectionId);
   const loadSubscriptions = useSubscriptionStore((state) => state.loadSubscriptions);
   const [selectedParserId, setSelectedParserId] = useState<SelectedParserId>("new");
@@ -95,6 +97,21 @@ export function ParserLibrary() {
     setDraft(createDraft(locale, selectedParser));
     setTestResult(null);
   }, [selectedParser]);
+
+  useEffect(() => {
+    if (!parserDraft) {
+      return;
+    }
+
+    setSelectedParserId("new");
+    setDraft({
+      id: parserDraft.id,
+      name: parserDraft.name,
+      script: parserDraft.script,
+    });
+    setTestResult(null);
+    clearParserDraft();
+  }, [clearParserDraft, parserDraft]);
 
   return (
     <div className="parser-library">

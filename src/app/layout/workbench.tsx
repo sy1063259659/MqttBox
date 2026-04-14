@@ -41,6 +41,7 @@ import {
 } from "@/services/events";
 import {
   getAppSettings,
+  getAgentSettings,
   getConnectionSecret,
   type AppSettingsDto,
 } from "@/services/tauri";
@@ -94,7 +95,7 @@ function AppWorkbenchContent({
   } = connectionStore;
   const { loadSubscriptions } = subscriptionStore;
   const { loadMessages, handleIncoming } = messageStore;
-  const { loadContext, loadTools, setStatusMessage } = agentStore;
+  const { loadContext, loadTools, loadServiceHealth, applyIncomingEvent } = agentStore;
   const {
     activeOverlay,
     closeOverlay,
@@ -249,6 +250,7 @@ function AppWorkbenchContent({
       try {
         const [loadedSettings] = await Promise.all([
           getAppSettings(),
+          getAgentSettings(),
           loadFolders(),
           loadProfiles(),
           parserStore.loadParsers(),
@@ -270,6 +272,7 @@ function AppWorkbenchContent({
 
         setAppReady(true);
         void loadTools().catch(() => undefined);
+        void loadServiceHealth().catch(() => undefined);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : t("toast.initFailed"));
       } finally {
@@ -279,7 +282,7 @@ function AppWorkbenchContent({
     };
 
     void bootstrap();
-  }, [hydrateActiveConnection, loadFolders, loadProfiles, loadTools, parserStore, setAppReady, setBootstrapping, setSettings, setTheme, t]);
+  }, [hydrateActiveConnection, loadFolders, loadProfiles, loadServiceHealth, loadTools, parserStore, setAppReady, setBootstrapping, setSettings, setTheme, t]);
 
   useEffect(() => {
     if (!connectionStore.activeConnectionId) {
@@ -368,14 +371,14 @@ function AppWorkbenchContent({
         handleIncoming(payload);
       }),
       registerAgentEvents((payload) => {
-        setStatusMessage(payload.message);
+        applyIncomingEvent(payload);
       }),
     ];
 
     return () => {
       void unregisterListeners(listeners);
     };
-  }, [handleIncoming, setRuntimeState, setStatusMessage]);
+  }, [applyIncomingEvent, handleIncoming, setRuntimeState]);
 
   const activeRuntime =
     (activeConnection && connectionStore.runtime[activeConnection.id]) ?? {
@@ -802,11 +805,7 @@ function AppWorkbenchContent({
               width="sm"
               onClose={uiStore.closeOverlay}
             >
-              <AgentPanel
-                context={agentStore.context}
-                tools={agentStore.tools}
-                statusMessage={agentStore.statusMessage}
-              />
+              <AgentPanel />
             </OverlaySheet>
             </main>
           </div>

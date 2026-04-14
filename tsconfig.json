@@ -6,7 +6,9 @@
     "module": "ESNext",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@agent-contracts": ["packages/agent-contracts/src/index.ts"],
+      "@agent-contracts/*": ["packages/agent-contracts/src/*"]
     },
     "skipLibCheck": true,
 

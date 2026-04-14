@@ -50,6 +50,8 @@ pub fn run() {
             commands::get_agent_context,
             commands::list_agent_tools,
             commands::get_app_settings,
+            commands::get_agent_settings,
+            commands::save_agent_settings,
             commands::save_app_settings,
         ])
         .run(tauri::generate_context!())

@@ -165,6 +165,19 @@ export class AgentHarness {
     };
   }
 
+  getConfig(): Record<string, unknown> {
+    return {
+      service: "agent-service",
+      model: this.deps.modelClient.getConfigSummary(),
+      transport: {
+        modes: ["in-memory", "ws"],
+      },
+      runtime: {
+        deepagentsRuntime: this.deps.deepAgentsAdapter.runtime,
+      },
+    };
+  }
+
   updateModelConfig(config: ModelRuntimeConfig) {
     this.deps.modelClient.configure(config);
     return this.deps.modelClient.getConfigSummary();

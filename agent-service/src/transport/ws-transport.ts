@@ -68,7 +68,7 @@ export class WsTransport implements AgentTransport {
     }
 
     await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
+      server.close((error?: Error) => {
         if (error) {
           reject(error);
           return;
@@ -86,7 +86,7 @@ export class WsTransport implements AgentTransport {
 
     await Promise.all(
       [...this.clients].map(
-        (client) =>
+        (client: WebSocket) =>
           new Promise<void>((resolve) => {
             if (client.readyState !== WebSocket.OPEN) {
               this.detachClient(client);
@@ -94,7 +94,7 @@ export class WsTransport implements AgentTransport {
               return;
             }
 
-            client.send(payload, (error) => {
+            client.send(payload, (error?: Error) => {
               if (error) {
                 this.logger.error("failed to publish websocket event", {
                   error: error.message,
@@ -116,19 +116,19 @@ export class WsTransport implements AgentTransport {
   }
 
   private bindServer(server: WebSocketServer): void {
-    server.on("connection", (client) => {
+    server.on("connection", (client: WebSocket) => {
       this.clients.add(client);
       this.logger.info("websocket client connected", {
         clients: this.clients.size,
       });
 
-      client.on("message", (data) => {
+      client.on("message", (data: RawData) => {
         this.handleClientMessage(data);
       });
       client.on("close", () => {
         this.detachClient(client);
       });
-      client.on("error", (error) => {
+      client.on("error", (error: Error) => {
         this.logger.error("websocket client error", {
           error: error.message,
         });

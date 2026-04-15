@@ -59,7 +59,7 @@ export class HttpServer {
     if (this.server) {
       return;
     }
-    this.server = createServer((req, res) => {
+    this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
       void this.handle(req, res);
     });
     await new Promise<void>((resolve) => {
@@ -75,7 +75,7 @@ export class HttpServer {
     const active = this.server;
     this.server = null;
     await new Promise<void>((resolve, reject) => {
-      active.close((error) => {
+      active.close((error?: Error) => {
         if (error) {
           reject(error);
           return;
@@ -99,7 +99,7 @@ export class HttpServer {
         return;
       }
       if (method === "GET" && url.pathname === "/config") {
-        this.sendJson(res, 200, this.harness.health());
+        this.sendJson(res, 200, this.harness.getConfig());
         return;
       }
       if (method === "POST" && url.pathname === "/config") {
@@ -221,7 +221,7 @@ export class HttpServer {
       content: string;
       attachments: AgentAttachmentDto[];
     },
-  ) {
+  ): Promise<void> {
     res.statusCode = 200;
     this.applyCors(res);
     res.setHeader("content-type", "application/x-ndjson; charset=utf-8");
@@ -229,7 +229,7 @@ export class HttpServer {
     res.setHeader("connection", "keep-alive");
     res.flushHeaders?.();
 
-    const writeChunk = (chunk: StreamChunkEvent | StreamChunkDone | StreamChunkError) => {
+    const writeChunk = (chunk: StreamChunkEvent | StreamChunkDone | StreamChunkError): void => {
       res.write(`${JSON.stringify(chunk)}\n`);
     };
 

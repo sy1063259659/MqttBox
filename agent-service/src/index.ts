@@ -12,10 +12,13 @@ import { InMemorySessionStore } from "./persistence/session-store.js";
 import { PolicyEngine } from "./policy/index.js";
 import { PromptRegistry } from "./prompts/index.js";
 import { InMemoryTransport } from "./transport/inmemory-transport.js";
-import { WsTransportStub } from "./transport/ws-stub.js";
+import { WsTransport } from "./transport/ws-transport.js";
+import { ToolRegistry, ToolRunner } from "./tools/index.js";
+import { TypedEventBus } from "./harness/event-bus.js";
 
 async function main(): Promise<void> {
   const logger = new Logger("agent-service");
+  const eventBus = new TypedEventBus();
   const sessionStore = new InMemorySessionStore();
   const promptRegistry = new PromptRegistry();
   const modelClient = createModelClient({
@@ -26,21 +29,30 @@ async function main(): Promise<void> {
     model: process.env.OPENAI_MODEL,
   });
   const transport = new InMemoryTransport();
-  const wsTransport = new WsTransportStub(logger);
+  const wsTransport = new WsTransport(logger, {
+    port: Number(process.env.AGENT_WS_PORT ?? 8788),
+  });
+  const toolRegistry = new ToolRegistry();
+  const toolRunner = new ToolRunner(toolRegistry);
   const harness = new AgentHarness({
     logger,
+    eventBus,
     sessionStore,
     transport,
     wsTransport,
     promptRegistry,
     policyEngine: new PolicyEngine(),
-    scheduler: new RunScheduler(),
+    scheduler: new RunScheduler({
+      executor: async () => {},
+    }),
     budgetManager: new BudgetManager(),
     capabilityRegistry: new CapabilityRegistry(),
     memoryStore: new MemoryStore(),
     artifactStore: new ArtifactStore(),
     deepAgentsAdapter: new DeepAgentsAdapter(logger),
     modelClient,
+    toolRegistry,
+    toolRunner,
   });
 
   await harness.start();

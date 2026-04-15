@@ -28,8 +28,9 @@ import type { InMemorySessionStore } from "../persistence/session-store.js";
 import type { PolicyEngine } from "../policy/index.js";
 import type { PromptRegistry } from "../prompts/index.js";
 import type { RunScheduler } from "../scheduler/index.js";
+import type { ToolRegistry, ToolRunner } from "../tools/index.js";
+import type { AgentTransport } from "../transport/types.js";
 import type { InMemoryTransport } from "../transport/inmemory-transport.js";
-import type { WsTransportStub } from "../transport/ws-stub.js";
 import { TypedEventBus } from "./event-bus.js";
 
 const DEFAULT_SESSION_MODE: AgentSessionMode = "chat";
@@ -70,9 +71,10 @@ export interface ResolveApprovalResult {
 
 export interface AgentHarnessDeps {
   logger: Logger;
+  eventBus: TypedEventBus;
   sessionStore: InMemorySessionStore;
   transport: InMemoryTransport;
-  wsTransport: WsTransportStub;
+  wsTransport: AgentTransport;
   promptRegistry: PromptRegistry;
   policyEngine: PolicyEngine;
   scheduler: RunScheduler;
@@ -82,10 +84,11 @@ export interface AgentHarnessDeps {
   artifactStore: ArtifactStore;
   deepAgentsAdapter: DeepAgentsAdapter;
   modelClient: ModelClient;
+  toolRegistry: ToolRegistry;
+  toolRunner: ToolRunner;
 }
 
 export class AgentHarness {
-  private readonly eventBus = new TypedEventBus();
   private readonly modeHandlers: Record<AgentSessionMode, ModeHandler>;
   private readonly eventCollectors = new Set<{
     events: AgentEvent[];
@@ -111,10 +114,14 @@ export class AgentHarness {
       chat: new ChatModeHandler({
         modelClient: deps.modelClient,
         promptRegistry: deps.promptRegistry,
+        eventBus: deps.eventBus,
+        toolRunner: deps.toolRunner,
       }),
       execute: new ExecuteModeHandler({
         modelClient: deps.modelClient,
         promptRegistry: deps.promptRegistry,
+        eventBus: deps.eventBus,
+        toolRunner: deps.toolRunner,
       }),
     };
   }
@@ -123,7 +130,8 @@ export class AgentHarness {
     await this.deps.transport.start();
     await this.deps.wsTransport.start();
     await this.deps.deepAgentsAdapter.initialize();
-    this.unsubscribeTransport = this.eventBus.subscribeAll((event) => {
+    this.deps.scheduler.start();
+    this.unsubscribeTransport = this.deps.eventBus.subscribeAll((event) => {
       void this.deps.transport.publish(event).catch((error: unknown) => {
         this.deps.logger.error("failed to publish event to in-memory transport", {
           error: String(error),
@@ -139,6 +147,7 @@ export class AgentHarness {
 
   async stop(): Promise<void> {
     this.unsubscribeTransport?.();
+    this.deps.scheduler.stop();
     await this.deps.wsTransport.stop();
     await this.deps.transport.stop();
   }
@@ -147,8 +156,9 @@ export class AgentHarness {
     return {
       status: "ok",
       service: "agent-service",
-      transport: "in-memory+ws-stub",
+      transport: "in-memory+ws",
       capabilities: this.deps.capabilityRegistry.list(),
+      tools: this.deps.toolRegistry.list(),
       memories: this.deps.memoryStore.list().length,
       deepagentsRuntime: this.deps.deepAgentsAdapter.runtime,
       model: this.deps.modelClient.getConfigSummary(),
@@ -160,17 +170,32 @@ export class AgentHarness {
     return this.deps.modelClient.getConfigSummary();
   }
 
+  listTools() {
+    return this.deps.toolRegistry.list();
+  }
+
   createSession(input: CreateSessionInput = {}): CreateSessionResult {
     const mode = input.mode ?? DEFAULT_SESSION_MODE;
     const safetyLevel = input.safetyLevel ?? DEFAULT_SAFETY_LEVEL;
 
     return this.captureEventsSync(() => {
-      if (!this.deps.policyEngine.canStartSession(mode, safetyLevel)) {
-        throw new Error(`Session rejected by policy: mode=${mode} safetyLevel=${safetyLevel}`);
+      const decision = this.deps.policyEngine.canStartSession(mode, safetyLevel);
+      if (!decision.allowed) {
+        throw new Error(
+          decision.reason ?? `Session rejected by policy: mode=${mode} safetyLevel=${safetyLevel}`,
+        );
       }
 
       const session = this.deps.sessionStore.create(mode, safetyLevel);
-      this.deps.scheduler.schedule(`session-${session.id}`);
+      this.deps.scheduler.schedule({
+        id: `session-${session.id}`,
+        sessionId: session.id,
+        capabilityId: "session.start",
+        input: {
+          mode,
+          safetyLevel,
+        },
+      });
       this.deps.logger.info("session created", {
         sessionId: session.id,
         mode,
@@ -196,12 +221,18 @@ export class AgentHarness {
       }
 
       const userMessageId = randomUUID();
-      const capability = this.deps.capabilityRegistry.resolve(session.mode, input.message);
+      const capabilityMatch = await this.deps.capabilityRegistry.resolveWithFallback(
+        session.mode,
+        input.message,
+      );
+      const capability = capabilityMatch.capability;
       this.deps.logger.info("message accepted", {
         sessionId: session.id,
         mode: session.mode,
         safetyLevel: session.safetyLevel,
         capabilityId: capability.id,
+        capabilityConfidence: capabilityMatch.confidence,
+        capabilityReason: capabilityMatch.matchReason,
       });
       this.emitEvent("session.message", session.id, null, {
         messageId: userMessageId,
@@ -230,6 +261,8 @@ export class AgentHarness {
           message: input.message,
           attachments: input.attachments ?? [],
           capabilityId: capability.id,
+          eventBus: this.deps.eventBus,
+          toolRunner: this.deps.toolRunner,
           onDelta: (delta) => {
             streamedContent += delta;
             this.emitEvent("assistant.delta", session.id, null, {
@@ -460,6 +493,9 @@ export class AgentHarness {
         message: buildExecutePrompt(input.message, input.suggestedTopicFilter, artifact),
         attachments: input.attachments,
         capabilityId: input.capabilityId,
+        runId: input.runId,
+        eventBus: this.deps.eventBus,
+        toolRunner: this.deps.toolRunner,
         onDelta: (delta) => {
           streamedContent += delta;
           this.emitEvent("assistant.delta", input.session.id, input.runId, {
@@ -547,7 +583,7 @@ export class AgentHarness {
       collector.onEvent?.(event);
     }
 
-    this.eventBus.publish(event);
+    this.deps.eventBus.publish(event);
   }
 
   private emitServiceError(sessionId: string, runId: string | null, error: unknown) {

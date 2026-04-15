@@ -10,6 +10,7 @@ export interface MessageParserInput {
   id?: string;
   name: string;
   script: string;
+  suggestedTestPayloadHex?: string;
 }
 
 export interface MessageParserTestRequest {

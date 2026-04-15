@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import type { AgentAttachmentDto, AgentSafetyLevel, AgentSessionMode } from "@agent-contracts";
-import type { AgentHarness } from "../harness/agent-harness.js";
+import { PARSER_AUTHORING_ATTACHMENT_POLICY } from "../capabilities/parser-authoring.js";
+import { AgentHarnessHttpError, type AgentHarness } from "../harness/agent-harness.js";
 import type { Logger } from "../observability/logger.js";
 
 interface SessionCreateRequestBody {
@@ -131,9 +132,10 @@ export class HttpServer {
       if (method === "POST" && messageMatch) {
         const body = await this.readJson<SessionMessageRequestBody>(req);
         if (!body.content || typeof body.content !== "string") {
-          this.sendJson(res, 400, { error: "content is required" });
+          this.sendJson(res, 400, { error: "content_required", message: "content is required" });
           return;
         }
+        this.validateAttachments(Array.isArray(body.attachments) ? body.attachments : []);
         const result = await this.harness.appendSessionMessage({
           sessionId: decodeURIComponent(messageMatch[1]),
           message: body.content,
@@ -146,9 +148,10 @@ export class HttpServer {
       if (method === "POST" && messageStreamMatch) {
         const body = await this.readJson<SessionMessageRequestBody>(req);
         if (!body.content || typeof body.content !== "string") {
-          this.sendJson(res, 400, { error: "content is required" });
+          this.sendJson(res, 400, { error: "content_required", message: "content is required" });
           return;
         }
+        this.validateAttachments(Array.isArray(body.attachments) ? body.attachments : []);
         await this.handleMessageStream(res, {
           sessionId: decodeURIComponent(messageStreamMatch[1]),
           content: body.content,
@@ -160,7 +163,7 @@ export class HttpServer {
       if (method === "POST" && approvalMatch) {
         const body = await this.readJson<ApprovalResolveRequestBody>(req);
         if (!body.outcome) {
-          this.sendJson(res, 400, { error: "outcome is required" });
+          this.sendJson(res, 400, { error: "outcome_required", message: "outcome is required" });
           return;
         }
         const result = await this.harness.resolveApproval(
@@ -173,6 +176,22 @@ export class HttpServer {
       }
       this.sendJson(res, 404, { error: "not_found" });
     } catch (error: unknown) {
+      if (error instanceof AgentHarnessHttpError) {
+        this.sendJson(res, error.statusCode, {
+          error: error.code,
+          message: error.message,
+          details: error.details ?? null,
+        });
+        return;
+      }
+      if (error instanceof HttpRequestError) {
+        this.sendJson(res, error.statusCode, {
+          error: error.code,
+          message: error.message,
+          details: error.details ?? null,
+        });
+        return;
+      }
       this.logger.error("request failed", {
         method,
         path: url.pathname,
@@ -180,6 +199,45 @@ export class HttpServer {
       });
       const message = error instanceof Error ? error.message : "internal_error";
       this.sendJson(res, 500, { error: message });
+    }
+  }
+
+  private validateAttachments(attachments: AgentAttachmentDto[]): void {
+    if (attachments.length > PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentCount) {
+      throw new HttpRequestError(
+        400,
+        "attachment_count_exceeded",
+        `Up to ${PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentCount} images are allowed per request.`,
+        { maxAttachmentCount: PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentCount },
+      );
+    }
+
+    for (const attachment of attachments) {
+      if (!PARSER_AUTHORING_ATTACHMENT_POLICY.acceptedImageMimeTypes.includes(attachment.mimeType)) {
+        throw new HttpRequestError(
+          400,
+          "attachment_mime_unsupported",
+          `Unsupported image type: ${attachment.mimeType}.`,
+          {
+            acceptedImageMimeTypes: PARSER_AUTHORING_ATTACHMENT_POLICY.acceptedImageMimeTypes,
+            mimeType: attachment.mimeType,
+          },
+        );
+      }
+
+      const byteSize = attachment.byteSize ?? estimateAttachmentBytes(attachment.dataUrl);
+      if (byteSize > PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentBytes) {
+        throw new HttpRequestError(
+          400,
+          "attachment_too_large",
+          `${attachment.filename ?? "Image"} exceeds the ${PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentBytes} byte limit.`,
+          {
+            filename: attachment.filename ?? null,
+            byteSize,
+            maxAttachmentBytes: PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentBytes,
+          },
+        );
+      }
     }
   }
 
@@ -265,4 +323,26 @@ export class HttpServer {
       res.end();
     }
   }
+}
+
+class HttpRequestError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly code: string,
+    message: string,
+    readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = "HttpRequestError";
+  }
+}
+
+function estimateAttachmentBytes(dataUrl: string): number {
+  const [, encoded = ""] = dataUrl.split(",", 2);
+  if (!encoded) {
+    return 0;
+  }
+
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((encoded.length * 3) / 4) - padding);
 }

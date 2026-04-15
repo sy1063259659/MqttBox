@@ -4,6 +4,7 @@ import type {
   AgentAttachmentDto,
   AgentEvent,
   AgentEventEnvelope,
+  AgentServiceConfigDto,
   AgentSessionMode,
   AgentSafetyLevel,
   ApprovalRequestDto,
@@ -23,6 +24,7 @@ import type {
 } from "@/features/agent/types";
 import {
   createAgentSession,
+  getAgentServiceConfig,
   getAgentServiceHealth,
   resolveAgentApproval,
   streamAgentMessage,
@@ -36,6 +38,7 @@ interface AgentStore extends AgentHarnessState {
   loadTools: () => Promise<void>;
   loadContext: (connectionId?: string | null) => Promise<void>;
   loadServiceHealth: () => Promise<void>;
+  loadServiceConfig: () => Promise<void>;
   setMode: (mode: AgentSessionMode) => void;
   setSafetyLevel: (safetyLevel: AgentSafetyLevel) => void;
   setDraftPrompt: (prompt: string) => void;
@@ -97,6 +100,7 @@ function resetRuntimeState() {
     approvals: [],
     approvalHistory: [],
     artifacts: [],
+    serviceConfig: null as AgentServiceConfigDto | null,
     runStatus: FALLBACK_RUN_STATUS,
     transportFlavor: "unknown" as const,
     statusMessage: null,
@@ -131,6 +135,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   approvals: [],
   approvalHistory: [],
   artifacts: [],
+  serviceConfig: null,
   capabilities: [],
   transportFlavor: "unknown",
   runStatus: FALLBACK_RUN_STATUS,
@@ -175,6 +180,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       set({
         capabilities: [],
         statusMessage: error instanceof Error ? error.message : "Agent service is unreachable",
+      });
+    }
+  },
+  async loadServiceConfig() {
+    try {
+      const serviceConfig = await getAgentServiceConfig();
+      set({ serviceConfig });
+    } catch (error) {
+      set({
+        serviceConfig: null,
+        statusMessage: error instanceof Error ? error.message : "Failed to load agent service config",
       });
     }
   },
@@ -328,6 +344,66 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         };
       }
 
+      if (incoming.type === "run.started") {
+        const run = incoming.payload.run;
+        const currentRun = state.timeline.runs.find((item) => item.id === run.id);
+        return {
+          timeline: {
+            ...state.timeline,
+            activeRunId: run.id,
+            runs: upsertRun(state.timeline.runs, {
+              ...(currentRun ?? {
+                ...run,
+                steps: [],
+              }),
+              ...run,
+              steps: currentRun?.steps ?? [],
+            }),
+          },
+          runStatus: run.status,
+          transportFlavor: "contract" as const,
+        };
+      }
+
+      if (incoming.type === "run.status") {
+        const nextRuns =
+          incoming.runId == null
+            ? state.timeline.runs
+            : state.timeline.runs.map((run) =>
+                run.id === incoming.runId ? { ...run, status: incoming.payload.status } : run,
+              );
+        return {
+          timeline: {
+            ...state.timeline,
+            runs: nextRuns,
+          },
+          runStatus: incoming.payload.status,
+          statusMessage: incoming.payload.message ?? state.statusMessage,
+          transportFlavor: "contract" as const,
+        };
+      }
+
+      if (incoming.type === "run.completed") {
+        const run = incoming.payload.run;
+        const currentRun = state.timeline.runs.find((item) => item.id === run.id);
+        return {
+          timeline: {
+            ...state.timeline,
+            activeRunId: run.id,
+            runs: upsertRun(state.timeline.runs, {
+              ...(currentRun ?? {
+                ...run,
+                steps: [],
+              }),
+              ...run,
+              steps: currentRun?.steps ?? [],
+            }),
+          },
+          runStatus: run.status,
+          transportFlavor: "contract" as const,
+        };
+      }
+
       if (incoming.type === "assistant.delta") {
         const existing = state.messages.find((item) => item.id === incoming.payload.messageId);
         const next = existing
@@ -380,15 +456,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
         return {
           messages: upsertMessage(state.messages, next),
-          runStatus:
-            incoming.runId == null
-              ? state.runStatus
-              : incoming.payload.finishReason === "error"
-                ? "failed"
-                : currentRun?.status === "completed"
-                  ? "completed"
-                  : "running",
           transportFlavor: "contract" as const,
+          runStatus: incoming.runId == null ? state.runStatus : currentRun?.status ?? state.runStatus,
         };
       }
 
@@ -421,7 +490,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
               steps: plan.steps,
             }),
           },
-          runStatus: "planning" as const,
           transportFlavor: "contract" as const,
         };
       }
@@ -477,7 +545,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
               steps: nextSteps,
             }),
           },
-          runStatus: mapStatusToRunState(nextRunStatus),
+          runStatus:
+            incoming.runId == null || state.timeline.activeRunId !== incoming.runId
+              ? state.runStatus
+              : mapStatusToRunState(state.runStatus === "idle" ? nextRunStatus : state.runStatus),
           transportFlavor: "contract" as const,
         };
       }
@@ -488,7 +559,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
         return {
           approvals: existing ? state.approvals : [request, ...state.approvals],
-          runStatus: "awaiting_approval" as const,
           transportFlavor: "contract" as const,
         };
       }
@@ -508,12 +578,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         return {
           approvals: state.approvals.filter((item) => item.id !== incoming.payload.requestId),
           approvalHistory: [resolution, ...state.approvalHistory],
-          runStatus:
-            incoming.payload.outcome === "approved"
-              ? currentRun?.status === "completed"
-                ? "completed"
-                : "running"
-              : "failed",
           statusMessage:
             incoming.payload.outcome === "approved"
               ? "Approval accepted"
@@ -521,6 +585,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
                 ? "Approval rejected"
                 : "Approval expired",
           transportFlavor: "contract" as const,
+          runStatus: currentRun?.status ?? state.runStatus,
         };
       }
 

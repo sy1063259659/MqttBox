@@ -1,5 +1,6 @@
 import type {
   AgentAttachmentDto,
+  AgentServiceConfigDto,
   CapabilityDescriptor,
   AgentEvent,
   AgentSafetyLevel,
@@ -56,6 +57,10 @@ export interface AgentServiceHealthDto {
   };
 }
 
+export interface AgentServiceRequestError extends Error {
+  code?: string;
+}
+
 const DEFAULT_AGENT_SERVICE_URL = "http://127.0.0.1:8787";
 
 async function resolveAgentSettings() {
@@ -92,7 +97,11 @@ async function requestJson<T>(path: string, init?: RequestInit & { serviceUrl?: 
     | null;
 
   if (!response.ok) {
-    throw new Error(payload?.message ?? payload?.error ?? `Agent service request failed: ${path}`);
+    const error = new Error(
+      payload?.message ?? payload?.error ?? `Agent service request failed: ${path}`,
+    ) as AgentServiceRequestError;
+    error.code = payload?.error;
+    throw error;
   }
 
   return payload as T;
@@ -210,6 +219,13 @@ export async function streamAgentMessage(input: {
 
 export async function getAgentServiceHealth(serviceUrl?: string) {
   return requestJson<AgentServiceHealthDto>("/health", {
+    method: "GET",
+    serviceUrl,
+  });
+}
+
+export async function getAgentServiceConfig(serviceUrl?: string) {
+  return requestJson<AgentServiceConfigDto>("/config", {
     method: "GET",
     serviceUrl,
   });

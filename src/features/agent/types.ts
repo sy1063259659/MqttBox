@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   AgentEventEnvelope,
   AgentRunDto,
+  AgentServiceConfigDto,
   AgentSafetyLevel,
   AgentSessionDto,
   AgentSessionMode,
@@ -71,6 +72,7 @@ export interface AgentHarnessState {
   approvalHistory: ApprovalResolutionRecord[];
   artifacts: AgentArtifactDto[];
   capabilities: CapabilityDescriptor[];
+  serviceConfig: AgentServiceConfigDto | null;
   transportFlavor: "unknown" | "legacy" | "contract";
   runStatus: RunStatus | "idle";
   statusMessage: string | null;

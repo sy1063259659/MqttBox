@@ -6,16 +6,21 @@ import type {
   AgentEventEnvelope,
   AgentEventPayloadByType,
   AgentEventType,
+  AgentServiceConfigDto,
   AgentSafetyLevel,
   AgentSessionDto,
   AgentSessionMode,
   ApprovalRequestDto,
-  ExecutionPlanDto,
   ExecutionStepDto,
 } from "@agent-contracts";
 import type { ArtifactStore } from "../artifacts/index.js";
 import type { BudgetManager } from "../budget/index.js";
 import type { CapabilityRegistry } from "../capabilities/index.js";
+import {
+  PARSER_AUTHORING_ATTACHMENT_POLICY,
+  ParserAuthoringHandler,
+  type ParserAuthoringHandlerContract,
+} from "../capabilities/parser-authoring.js";
 import type { DeepAgentsAdapter } from "../integrations/deepagents-adapter.js";
 import type { MemoryStore } from "../memory/index.js";
 import type { ModelClient, ModelRuntimeConfig } from "../models/types.js";
@@ -90,6 +95,7 @@ export interface AgentHarnessDeps {
 
 export class AgentHarness {
   private readonly modeHandlers: Record<AgentSessionMode, ModeHandler>;
+  private readonly parserAuthoringHandler: ParserAuthoringHandlerContract;
   private readonly eventCollectors = new Set<{
     events: AgentEvent[];
     onEvent?: (event: AgentEvent) => void;
@@ -106,10 +112,12 @@ export class AgentHarness {
       suggestedTopicFilter: string;
       userMessageId: string;
       capabilityId: string;
+      startedAt: string;
     }
   >();
 
   constructor(private readonly deps: AgentHarnessDeps) {
+    this.parserAuthoringHandler = new ParserAuthoringHandler();
     this.modeHandlers = {
       chat: new ChatModeHandler({
         modelClient: deps.modelClient,
@@ -165,7 +173,8 @@ export class AgentHarness {
     };
   }
 
-  getConfig(): Record<string, unknown> {
+  getConfig(): AgentServiceConfigDto {
+    const capabilities = this.deps.capabilityRegistry.list();
     return {
       service: "agent-service",
       model: this.deps.modelClient.getConfigSummary(),
@@ -175,6 +184,12 @@ export class AgentHarness {
       runtime: {
         deepagentsRuntime: this.deps.deepAgentsAdapter.runtime,
       },
+      supportsImageInput: true,
+      supportsParserAuthoring: capabilities.some((capability) => capability.id === "parser-authoring"),
+      supportsApproval: true,
+      maxAttachmentCount: PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentCount,
+      maxAttachmentBytes: PARSER_AUTHORING_ATTACHMENT_POLICY.maxAttachmentBytes,
+      acceptedImageMimeTypes: [...PARSER_AUTHORING_ATTACHMENT_POLICY.acceptedImageMimeTypes],
     };
   }
 
@@ -322,8 +337,19 @@ export class AgentHarness {
     capabilityId: string,
   ): Promise<Omit<AppendSessionMessageResult, "events">> {
     const runId = randomUUID();
-    const suggestedTopicFilter = inferSuggestedTopicFilter(message);
-    const plan = createParserPlan(runId, message);
+    const startedAt = new Date().toISOString();
+    const suggestedTopicFilter = this.parserAuthoringHandler.inferSuggestedTopicFilter(message);
+    const plan = this.parserAuthoringHandler.createPlan(runId, message);
+    this.emitEvent("run.started", session.id, runId, {
+      run: this.parserAuthoringHandler.createRun({
+        session,
+        runId,
+        goal: message,
+        capabilityId,
+        status: "planning",
+        startedAt,
+      }),
+    });
     this.deps.logger.info("run started", {
       sessionId: session.id,
       runId,
@@ -333,6 +359,11 @@ export class AgentHarness {
     });
 
     this.emitEvent("plan.ready", session.id, runId, { plan });
+    this.emitEvent("run.status", session.id, runId, {
+      runId,
+      status: "planning",
+      message: "Execution plan ready",
+    });
 
     for (const step of plan.steps) {
       const startedStep = {
@@ -356,7 +387,12 @@ export class AgentHarness {
     }
 
     if (session.safetyLevel === "confirm") {
-      const request = createApprovalRequest(runId, suggestedTopicFilter, message, session.safetyLevel);
+      const request = this.parserAuthoringHandler.createApprovalRequest(
+        runId,
+        suggestedTopicFilter,
+        message,
+        session.safetyLevel,
+      );
       this.pendingApprovals.set(request.id, {
         session,
         runId,
@@ -366,12 +402,18 @@ export class AgentHarness {
         suggestedTopicFilter,
         userMessageId,
         capabilityId,
+        startedAt,
       });
       this.deps.logger.info("approval requested", {
         sessionId: session.id,
         runId,
         capabilityId,
         requestId: request.id,
+      });
+      this.emitEvent("run.status", session.id, runId, {
+        runId,
+        status: "awaiting_approval",
+        message: "Waiting for approval to create parser draft artifact",
       });
       this.emitEvent("approval.requested", session.id, runId, { request });
 
@@ -399,6 +441,7 @@ export class AgentHarness {
       attachments,
       suggestedTopicFilter,
       capabilityId,
+      startedAt,
     });
   }
 
@@ -428,7 +471,12 @@ export class AgentHarness {
     return this.captureApprovalEvents(async () => {
       const pending = this.pendingApprovals.get(requestId);
       if (!pending || pending.session.id !== sessionId) {
-        throw new Error(`Approval request not found: ${requestId}`);
+        throw new AgentHarnessHttpError(
+          410,
+          "approval_request_expired",
+          "Approval expired after agent-service restart or timeout. Please rerun the task.",
+          { requestId },
+        );
       }
 
       this.pendingApprovals.delete(requestId);
@@ -446,6 +494,11 @@ export class AgentHarness {
       });
 
       if (outcome === "approved") {
+        this.emitEvent("run.status", sessionId, pending.runId, {
+          runId: pending.runId,
+          status: "producing_artifact",
+          message: "Approval accepted, generating parser draft",
+        });
         await this.completeParserAuthoring({
           session: pending.session,
           runId: pending.runId,
@@ -454,6 +507,7 @@ export class AgentHarness {
           attachments: pending.attachments,
           suggestedTopicFilter: pending.suggestedTopicFilter,
           capabilityId: pending.capabilityId,
+          startedAt: pending.startedAt,
         });
       } else {
         const assistantMessageId = randomUUID();
@@ -464,6 +518,19 @@ export class AgentHarness {
         this.emitEvent("assistant.final", sessionId, pending.runId, {
           messageId: assistantMessageId,
           content,
+          finishReason: "error",
+        });
+        const completedAt = new Date().toISOString();
+        this.emitEvent("run.completed", sessionId, pending.runId, {
+          run: this.parserAuthoringHandler.createRun({
+            session: pending.session,
+            runId: pending.runId,
+            goal: pending.message,
+            capabilityId: pending.capabilityId,
+            status: "failed",
+            startedAt: pending.startedAt,
+            completedAt,
+          }),
           finishReason: "error",
         });
       }
@@ -485,9 +552,15 @@ export class AgentHarness {
     attachments: AgentAttachmentDto[];
     suggestedTopicFilter: string;
     capabilityId: string;
+    startedAt: string;
   }): Promise<Omit<AppendSessionMessageResult, "events">> {
+    this.emitEvent("run.status", input.session.id, input.runId, {
+      runId: input.runId,
+      status: "producing_artifact",
+      message: "Building parser draft artifact",
+    });
     const artifact = this.deps.artifactStore.save(
-      createParserArtifact(
+      this.parserAuthoringHandler.createArtifact(
         input.runId,
         input.message,
         input.suggestedTopicFilter,
@@ -495,6 +568,11 @@ export class AgentHarness {
       ),
     );
     this.emitEvent("artifact.ready", input.session.id, input.runId, { artifact });
+    this.emitEvent("run.status", input.session.id, input.runId, {
+      runId: input.runId,
+      status: "running",
+      message: "Generating parser authoring summary",
+    });
 
     let assistantContent: string;
     let modelFailed = false;
@@ -503,7 +581,11 @@ export class AgentHarness {
     try {
       assistantContent = await this.modeHandlers.execute.respond({
         session: input.session,
-        message: buildExecutePrompt(input.message, input.suggestedTopicFilter, artifact),
+        message: this.parserAuthoringHandler.buildExecutePrompt(
+          input.message,
+          input.suggestedTopicFilter,
+          artifact,
+        ),
         attachments: input.attachments,
         capabilityId: input.capabilityId,
         runId: input.runId,
@@ -533,6 +615,19 @@ export class AgentHarness {
       runId: input.runId,
       capabilityId: input.capabilityId,
       safetyLevel: input.session.safetyLevel,
+      finishReason: modelFailed ? "error" : "stop",
+    });
+    const completedAt = new Date().toISOString();
+    this.emitEvent("run.completed", input.session.id, input.runId, {
+      run: this.parserAuthoringHandler.createRun({
+        session: input.session,
+        runId: input.runId,
+        goal: input.message,
+        capabilityId: input.capabilityId,
+        status: modelFailed ? "failed" : "completed",
+        startedAt: input.startedAt,
+        completedAt,
+      }),
       finishReason: modelFailed ? "error" : "stop",
     });
 
@@ -609,136 +704,16 @@ export class AgentHarness {
   }
 }
 
-function createParserPlan(runId: string, goal: string): ExecutionPlanDto {
-  return {
-    runId,
-    capabilityId: "parser-authoring",
-    goal,
-    steps: [
-      createPlanStep(runId, 0, "Inspect parser request", "planning"),
-      createPlanStep(runId, 1, "Build parser draft", "artifact"),
-      createPlanStep(runId, 2, "Prepare parser artifact", "artifact"),
-    ],
-  };
-}
-
-function createPlanStep(
-  runId: string,
-  index: number,
-  title: string,
-  kind: string,
-): ExecutionStepDto {
-  return {
-    id: randomUUID(),
-    runId,
-    index,
-    title,
-    kind,
-    status: "pending",
-    toolName: null,
-    attempt: 0,
-    startedAt: null,
-    completedAt: null,
-    error: null,
-  };
-}
-
-function inferSuggestedTopicFilter(message: string) {
-  const directTopic =
-    message.match(/(?:topic|主题)\s*[:：]\s*([A-Za-z0-9/_#+-]+)/i)?.[1] ??
-    message.match(/\b([A-Za-z0-9_-]+\/[A-Za-z0-9/_#+-]+)\b/)?.[1];
-
-  return directTopic?.trim() || "telemetry/raw";
-}
-
-function toParserName(topicFilter: string) {
-  return topicFilter
-    .split(/[\/_-]+/)
-    .filter(Boolean)
-    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-    .join(" ")
-    .concat(" Parser");
-}
-
-function createParserArtifact(
-  runId: string,
-  request: string,
-  topicFilter: string,
-  attachmentCount: number,
-): AgentArtifactDto {
-  const name = toParserName(topicFilter);
-  const notes =
-    attachmentCount > 0
-      ? `Generated from execute mode with ${attachmentCount} image attachment(s).`
-      : "Generated from execute mode without attachments.";
-
-  const script = `function parse(input, helpers) {
-  const bytes = helpers.hexToBytes(input.payloadHex);
-
-  return {
-    topic: input.topic,
-    topicFilter: "${topicFilter}",
-    payloadHex: input.payloadHex,
-    payloadSize: input.payloadSize,
-    byteLength: bytes.length,
-    requestSummary: ${JSON.stringify(request.trim().slice(0, 120))},
-  };
-}`;
-
-  return {
-    id: randomUUID(),
-    runId,
-    capabilityId: "parser-authoring",
-    type: "parser-script",
-    schemaVersion: 1,
-    title: name,
-    summary: `Parser draft for ${topicFilter}`,
-    payload: {
-      name,
-      script,
-      notes,
-      suggestedTopicFilter: topicFilter,
-      sourceSampleSummary: request.trim().slice(0, 120),
-    },
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function buildExecutePrompt(
-  request: string,
-  topicFilter: string,
-  artifact: AgentArtifactDto,
-) {
-  return `Generate a concise execute-mode summary for parser authoring.\nRequest: ${request}\nSuggested topic filter: ${topicFilter}\nArtifact title: ${artifact.title}`;
-}
-
-function createApprovalRequest(
-  runId: string,
-  topicFilter: string,
-  request: string,
-  safetyLevel: AgentSafetyLevel,
-): ApprovalRequestDto {
-  return {
-    id: randomUUID(),
-    runId,
-    stepId: null,
-    toolName: "artifact.createParserDraft",
-    title: "Approve parser draft creation",
-    actionSummary: `Create a parser draft artifact for ${topicFilter}`,
-    reason: request.trim().slice(0, 160) || "Execute mode requires confirmation before producing the parser draft artifact.",
-    riskLevel: "medium",
-    safetyLevel,
-    inputPreview: JSON.stringify(
-      {
-        suggestedTopicFilter: topicFilter,
-        request: request.trim().slice(0, 200),
-      },
-      null,
-      2,
-    ),
-    requestedAt: new Date().toISOString(),
-    expiresAt: null,
-  };
+export class AgentHarnessHttpError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly code: string,
+    message: string,
+    readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = "AgentHarnessHttpError";
+  }
 }
 
 function toModelErrorMessage(error: unknown) {

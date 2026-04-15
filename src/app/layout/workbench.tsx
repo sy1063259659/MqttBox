@@ -95,7 +95,7 @@ function AppWorkbenchContent({
   } = connectionStore;
   const { loadSubscriptions } = subscriptionStore;
   const { loadMessages, handleIncoming } = messageStore;
-  const { loadContext, loadTools, loadServiceHealth, applyIncomingEvent } = agentStore;
+  const { loadContext, loadTools, loadServiceHealth, loadServiceConfig, applyIncomingEvent } = agentStore;
   const {
     activeOverlay,
     closeOverlay,
@@ -273,6 +273,7 @@ function AppWorkbenchContent({
         setAppReady(true);
         void loadTools().catch(() => undefined);
         void loadServiceHealth().catch(() => undefined);
+        void loadServiceConfig().catch(() => undefined);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : t("toast.initFailed"));
       } finally {
@@ -282,7 +283,7 @@ function AppWorkbenchContent({
     };
 
     void bootstrap();
-  }, [hydrateActiveConnection, loadFolders, loadProfiles, loadServiceHealth, loadTools, parserStore, setAppReady, setBootstrapping, setSettings, setTheme, t]);
+  }, [hydrateActiveConnection, loadFolders, loadProfiles, loadServiceConfig, loadServiceHealth, loadTools, parserStore, setAppReady, setBootstrapping, setSettings, setTheme, t]);
 
   useEffect(() => {
     if (!connectionStore.activeConnectionId) {

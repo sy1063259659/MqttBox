@@ -137,6 +137,50 @@ export interface AgentAttachmentDto {
   mimeType: string;
   filename?: string | null;
   dataUrl: string;
+  byteSize?: number | null;
+}
+
+export interface ParserArtifactEditorPayload {
+  name: string;
+  script: string;
+  suggestedTestPayloadHex?: string;
+}
+
+export interface ParserArtifactReviewPayload {
+  summary: string;
+  assumptions: string[];
+  risks: string[];
+  nextSteps: string[];
+}
+
+export interface ParserScriptArtifactPayload {
+  editorPayload: ParserArtifactEditorPayload;
+  reviewPayload: ParserArtifactReviewPayload;
+  suggestedTopicFilter?: string;
+  sourceSampleSummary?: string;
+}
+
+export interface AgentServiceConfigDto {
+  service: string;
+  model?: {
+    provider: string;
+    configured: boolean;
+    model: string;
+    baseUrl: string;
+    enabled: boolean;
+  };
+  transport: {
+    modes: string[];
+  };
+  runtime: {
+    deepagentsRuntime: string;
+  };
+  supportsImageInput: boolean;
+  supportsParserAuthoring: boolean;
+  supportsApproval: boolean;
+  maxAttachmentCount: number;
+  maxAttachmentBytes: number;
+  acceptedImageMimeTypes: string[];
 }
 
 export interface ExecutionPlanDto {
@@ -172,6 +216,21 @@ export interface AssistantFinalPayload {
 
 export interface PlanReadyPayload {
   plan: ExecutionPlanDto;
+}
+
+export interface RunStartedPayload {
+  run: AgentRunDto;
+}
+
+export interface RunStatusPayload {
+  runId: string;
+  status: RunStatus;
+  message?: string | null;
+}
+
+export interface RunCompletedPayload {
+  run: AgentRunDto;
+  finishReason?: "stop" | "length" | "tool_call" | "error" | null;
 }
 
 export interface PlanStepStartedPayload {
@@ -228,6 +287,9 @@ export interface ServiceErrorPayload {
 export type AgentEventType =
   | "session.start"
   | "session.message"
+  | "run.started"
+  | "run.status"
+  | "run.completed"
   | "assistant.delta"
   | "assistant.final"
   | "plan.ready"
@@ -244,6 +306,9 @@ export type AgentEventType =
 export interface AgentEventPayloadByType {
   "session.start": SessionStartPayload;
   "session.message": SessionMessagePayload;
+  "run.started": RunStartedPayload;
+  "run.status": RunStatusPayload;
+  "run.completed": RunCompletedPayload;
   "assistant.delta": AssistantDeltaPayload;
   "assistant.final": AssistantFinalPayload;
   "plan.ready": PlanReadyPayload;

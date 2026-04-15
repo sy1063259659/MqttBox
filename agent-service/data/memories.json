@@ -1,0 +1,16 @@
+[
+  {
+    "id": "mem-1",
+    "kind": "note",
+    "scopeType": "global",
+    "scopeRef": "workspace",
+    "title": "Persisted memory",
+    "content": "Remember this",
+    "summary": "Short summary",
+    "language": "en",
+    "createdAt": "2026-04-15T00:00:00.000Z",
+    "updatedAt": "2026-04-15T00:00:00.000Z",
+    "source": "test",
+    "pinned": false
+  }
+]

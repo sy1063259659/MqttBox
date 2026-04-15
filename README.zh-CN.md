@@ -87,6 +87,7 @@ npm run desktop:build
 
 - [路线图](./docs/roadmap.md)
 - [UI 与工作流说明](./docs/react-tauri-desktop-ui-workflow.md)
+- [Agent Harness / 解析脚本生成功能现状](./docs/agent-harness-parser-authoring-status.md)
 
 ## 当前范围
 
@@ -98,6 +99,14 @@ npm run desktop:build
 - 消息历史与导出
 - payload 查看与解析脚本调试支持
 - 主题、语言与桌面工作区体验
+
+此外，仓库里已经有一条实验性的 Agent Service + 解析脚本生成链路：
+
+- execute 模式生成解析脚本草案
+- 通过 approval 控制产物创建
+- 一键把生成草案打开到 ParserLibrary 中继续编辑、测试、保存
+
+这部分能力仍处于 contract / boundary 持续收敛阶段，当前差距请参考上面的专项状态文档。
 
 后续能力扩展和产品方向以路线图为准。
 

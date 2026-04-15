@@ -81,6 +81,11 @@ This phase turns MqttBox from usable into efficient for heavier daily debugging.
 
 This phase is where real agent capability starts.
 
+Current status note:
+
+- the repository already contains an experimental `agent-service` + parser-authoring slice
+- the current gap is no longer “start from zero”, but “freeze contracts, cut boundaries, and complete verification”
+
 - Connect a real model provider and tool-calling flow.
 - Support safe read-only agent tools first, then guided write actions such as:
   subscription suggestions, publish draft generation, and connection diagnostics.

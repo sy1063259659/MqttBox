@@ -1,9 +1,16 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryStore } from "./index.js";
 
-const DATA_FILE = resolve(process.cwd(), "data", "memories.json");
+const DATA_FILE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "data",
+  "memories.json",
+);
 let originalFile: string | null | undefined;
 
 function backupFile() {

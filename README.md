@@ -87,6 +87,7 @@ npm run desktop:build
 
 - [Roadmap](./docs/roadmap.md)
 - [UI and workflow guidance](./docs/react-tauri-desktop-ui-workflow.md)
+- [Agent harness parser-authoring status](./docs/agent-harness-parser-authoring-status.md)
 
 ## Current Scope
 
@@ -98,6 +99,14 @@ The current repository focuses on the core MQTT desktop workflow:
 - message history and export
 - payload inspection and parser-based debugging support
 - theme, locale, and workspace-level desktop UX
+
+There is also an experimental agent-service slice for parser authoring:
+
+- execute-mode parser draft generation
+- approval-gated artifact creation
+- opening generated drafts in ParserLibrary for edit/test/save
+
+That slice is still under active contract/boundary hardening; see the dedicated status doc above for current gaps.
 
 The roadmap remains the source of truth for upcoming features and larger product direction.
 

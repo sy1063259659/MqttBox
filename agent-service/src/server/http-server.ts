@@ -213,7 +213,11 @@ export class HttpServer {
     }
 
     for (const attachment of attachments) {
-      if (!PARSER_AUTHORING_ATTACHMENT_POLICY.acceptedImageMimeTypes.includes(attachment.mimeType)) {
+      if (
+        !PARSER_AUTHORING_ATTACHMENT_POLICY.acceptedImageMimeTypes.some(
+          (mimeType) => mimeType === attachment.mimeType,
+        )
+      ) {
         throw new HttpRequestError(
           400,
           "attachment_mime_unsupported",

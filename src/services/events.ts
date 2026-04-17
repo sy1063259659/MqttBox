@@ -3,24 +3,40 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AgentEventPayload, ConnectionEventPayload } from "./tauri";
 import type { MessageRecordDto } from "@/features/messages/types";
 
+function hasTauriEventRuntime() {
+  const target = globalThis as typeof globalThis & {
+    __TAURI_INTERNALS__?: unknown;
+    __TAURI__?: unknown;
+  };
+
+  return typeof window !== "undefined" && Boolean(target.__TAURI_INTERNALS__ || target.__TAURI__);
+}
+
+function registerListener<TPayload>(
+  eventName: string,
+  onEvent: (payload: TPayload) => void,
+): Promise<UnlistenFn> {
+  if (!hasTauriEventRuntime()) {
+    return Promise.resolve(() => undefined);
+  }
+
+  return listen<TPayload>(eventName, (event) => {
+    onEvent(event.payload);
+  }).catch(() => () => undefined);
+}
+
 export function registerConnectionEvents(
   onEvent: (payload: ConnectionEventPayload) => void,
 ) {
-  return listen<ConnectionEventPayload>("connection://status", (event) => {
-    onEvent(event.payload);
-  });
+  return registerListener("connection://status", onEvent);
 }
 
 export function registerMessageEvents(onEvent: (payload: MessageRecordDto) => void) {
-  return listen<MessageRecordDto>("message://received", (event) => {
-    onEvent(event.payload);
-  });
+  return registerListener("message://received", onEvent);
 }
 
 export function registerAgentEvents(onEvent: (payload: AgentEventPayload) => void) {
-  return listen<AgentEventPayload>("agent://status", (event) => {
-    onEvent(event.payload);
-  });
+  return registerListener("agent://status", onEvent);
 }
 
 export async function unregisterListeners(unlisteners: Array<Promise<UnlistenFn>>) {

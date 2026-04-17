@@ -10,6 +10,7 @@ import {
 import { save } from "@tauri-apps/plugin-dialog";
 import { toast, Toaster } from "sonner";
 
+import { restoreAgentServiceRuntime } from "@/app/layout/agent-bootstrap";
 import { AgentPanel } from "@/components/features/agent-panel";
 import { AppTitlebar } from "@/components/features/app-titlebar";
 import { ConnectionEditor } from "@/components/features/connection-editor";
@@ -95,7 +96,14 @@ function AppWorkbenchContent({
   } = connectionStore;
   const { loadSubscriptions } = subscriptionStore;
   const { loadMessages, handleIncoming } = messageStore;
-  const { loadContext, loadTools, loadServiceHealth, loadServiceConfig, applyIncomingEvent } = agentStore;
+  const {
+    loadContext,
+    loadTools,
+    loadServiceHealth,
+    loadServiceConfig,
+    applyIncomingEvent,
+    setStatusMessage,
+  } = agentStore;
   const {
     activeOverlay,
     closeOverlay,
@@ -248,7 +256,7 @@ function AppWorkbenchContent({
     const bootstrap = async () => {
       setBootstrapping(true);
       try {
-        const [loadedSettings] = await Promise.all([
+        const [loadedSettings, loadedAgentSettings] = await Promise.all([
           getAppSettings(),
           getAgentSettings(),
           loadFolders(),
@@ -272,8 +280,11 @@ function AppWorkbenchContent({
 
         setAppReady(true);
         void loadTools().catch(() => undefined);
-        void loadServiceHealth().catch(() => undefined);
-        void loadServiceConfig().catch(() => undefined);
+        void restoreAgentServiceRuntime(loadedAgentSettings, {
+          loadServiceHealth,
+          loadServiceConfig,
+          setStatusMessage,
+        }).catch(() => undefined);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : t("toast.initFailed"));
       } finally {
@@ -283,7 +294,7 @@ function AppWorkbenchContent({
     };
 
     void bootstrap();
-  }, [hydrateActiveConnection, loadFolders, loadProfiles, loadServiceConfig, loadServiceHealth, loadTools, parserStore, setAppReady, setBootstrapping, setSettings, setTheme, t]);
+  }, [hydrateActiveConnection, loadFolders, loadProfiles, loadServiceConfig, loadServiceHealth, loadTools, parserStore, setAppReady, setBootstrapping, setSettings, setStatusMessage, setTheme, t]);
 
   useEffect(() => {
     if (!connectionStore.activeConnectionId) {
@@ -803,7 +814,7 @@ function AppWorkbenchContent({
               open={uiStore.activeOverlay === "agent"}
               title={t("overlay.agent.title")}
               position="right"
-              width="sm"
+              width="md"
               onClose={uiStore.closeOverlay}
             >
               <AgentPanel />

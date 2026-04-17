@@ -52,6 +52,7 @@ export interface AgentThreadMessage {
   attachments: AgentAttachmentDto[];
   runId?: string | null;
   isStreaming?: boolean;
+  isOptimistic?: boolean;
 }
 
 export interface ApprovalResolutionRecord {

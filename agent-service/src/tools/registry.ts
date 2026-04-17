@@ -16,6 +16,10 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  listDefinitions(): ToolDefinition[] {
+    return Array.from(this.tools.values());
+  }
+
   list(): ToolDescriptor[] {
     return Array.from(this.tools.values(), (tool) => toToolDescriptor(tool));
   }

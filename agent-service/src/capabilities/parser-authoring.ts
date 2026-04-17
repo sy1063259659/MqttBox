@@ -34,14 +34,16 @@ export interface ParserAuthoringHandlerContract {
     topicFilter: string,
     request: string,
     safetyLevel: AgentSafetyLevel,
+    artifactCandidate?: unknown,
+    approvalDescription?: string | null,
   ): ApprovalRequestDto;
-  createArtifact(
-    runId: string,
-    request: string,
-    topicFilter: string,
-    attachmentCount: number,
-  ): AgentArtifactDto;
-  buildExecutePrompt(request: string, topicFilter: string, artifact: AgentArtifactDto): string;
+  normalizeArtifactCandidate(input: {
+    runId: string;
+    request: string;
+    topicFilter: string;
+    attachmentCount: number;
+    artifactCandidate: unknown;
+  }): { artifact: AgentArtifactDto | null; error: string | null };
 }
 
 export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
@@ -94,97 +96,139 @@ export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
     topicFilter: string,
     request: string,
     safetyLevel: AgentSafetyLevel,
+    artifactCandidate?: unknown,
+    approvalDescription?: string | null,
   ): ApprovalRequestDto {
+    const candidate = this.asRecord(artifactCandidate);
+    const payloadCandidate = this.asRecord(candidate?.payload) ?? candidate;
+    const editorCandidate = this.asRecord(payloadCandidate?.editorPayload) ?? payloadCandidate;
+    const reviewCandidate = this.asRecord(payloadCandidate?.reviewPayload) ?? payloadCandidate;
+    const draftName =
+      this.readNonEmptyString(editorCandidate?.name) ?? this.readNonEmptyString(candidate?.title);
+    const draftSummary =
+      this.readNonEmptyString(candidate?.summary) ??
+      this.readNonEmptyString(reviewCandidate?.summary) ??
+      this.readNonEmptyString(approvalDescription);
+
     return {
       id: randomUUID(),
       runId,
       stepId: null,
       toolName: "artifact.createParserDraft",
       title: "Approve parser draft creation",
-      actionSummary: `Create a parser draft artifact for ${topicFilter}`,
+      actionSummary: draftName
+        ? `Create parser draft "${draftName}" for ${topicFilter}`
+        : `Create a parser draft artifact for ${topicFilter}`,
       reason:
         request.trim().slice(0, 160) ||
         "Execute mode requires confirmation before producing the parser draft artifact.",
       riskLevel: "medium",
       safetyLevel,
       inputPreview: JSON.stringify(
-        {
-          suggestedTopicFilter: topicFilter,
-          request: request.trim().slice(0, 200),
-        },
-        null,
-        2,
-      ),
+          {
+            suggestedTopicFilter: topicFilter,
+            request: request.trim().slice(0, 200),
+            ...(draftName ? { draftName } : {}),
+            ...(draftSummary ? { draftSummary } : {}),
+          },
+          null,
+          2,
+        ),
       requestedAt: new Date().toISOString(),
       expiresAt: null,
     };
   }
 
-  createArtifact(
-    runId: string,
-    request: string,
-    topicFilter: string,
-    attachmentCount: number,
-  ): AgentArtifactDto {
-    const name = this.toParserName(topicFilter);
-    const requestSummary = request.trim().slice(0, 120);
+  normalizeArtifactCandidate(input: {
+    runId: string;
+    request: string;
+    topicFilter: string;
+    attachmentCount: number;
+    artifactCandidate: unknown;
+  }): { artifact: AgentArtifactDto | null; error: string | null } {
+    const candidate = this.asRecord(input.artifactCandidate);
+    if (!candidate) {
+      return {
+        artifact: null,
+        error: "Parser authoring runtime did not return an artifact candidate.",
+      };
+    }
+
+    const payloadCandidate = this.asRecord(candidate.payload) ?? candidate;
+    const editorCandidate = this.asRecord(payloadCandidate.editorPayload) ?? payloadCandidate;
+    const reviewCandidate = this.asRecord(payloadCandidate.reviewPayload) ?? payloadCandidate;
+
+    const topicFilter =
+      this.readNonEmptyString(payloadCandidate.suggestedTopicFilter) ?? input.topicFilter;
+    const script = this.readNonEmptyString(editorCandidate.script);
+    if (!script) {
+      return {
+        artifact: null,
+        error: "Parser authoring runtime returned an artifact candidate without a parser script.",
+      };
+    }
+
+    const name =
+      this.readNonEmptyString(editorCandidate.name) ??
+      this.readNonEmptyString(candidate.title) ??
+      this.toParserName(topicFilter);
+    const requestSummary = input.request.trim().slice(0, 120);
+    const suggestedTestPayloadHex = this.readNonEmptyString(editorCandidate.suggestedTestPayloadHex);
+    const summary =
+      this.readNonEmptyString(candidate.summary) ??
+      this.readNonEmptyString(reviewCandidate.summary) ??
+      `Parser draft for ${topicFilter}`;
+    const sourceSampleSummary =
+      this.readNonEmptyString(payloadCandidate.sourceSampleSummary) ?? requestSummary;
     const generatedFromImages =
-      attachmentCount > 0
-        ? `Generated from execute mode with ${attachmentCount} image attachment(s).`
+      input.attachmentCount > 0
+        ? `Generated from execute mode with ${input.attachmentCount} image attachment(s).`
         : "Generated from execute mode without attachments.";
-
-    const script = `function parse(input, helpers) {
-  const bytes = helpers.hexToBytes(input.payloadHex);
-
-  return {
-    topic: input.topic,
-    topicFilter: "${topicFilter}",
-    payloadHex: input.payloadHex,
-    payloadSize: input.payloadSize,
-    byteLength: bytes.length,
-    requestSummary: ${JSON.stringify(requestSummary)},
-  };
-}`;
+    const reviewSummary =
+      this.readNonEmptyString(reviewCandidate.summary) ??
+      `${generatedFromImages} Draft targets ${topicFilter}.`;
+    const assumptions = this.readStringList(reviewCandidate.assumptions, [
+      "Input topic structure remains stable enough to derive the parser name.",
+      "The generated draft still needs human review before production use.",
+    ]);
+    const risks = this.readStringList(reviewCandidate.risks, [
+      "Payload field semantics still need validation in ParserLibrary test runs.",
+      "Generated field names may need adjustment after comparing against live samples.",
+    ]);
+    const nextSteps = this.readStringList(reviewCandidate.nextSteps, [
+      "Open the draft in ParserLibrary.",
+      "Run the suggested payload smoke test and adjust field extraction.",
+      "Save the parser once the topic filter and output shape are confirmed.",
+    ]);
 
     return {
-      id: randomUUID(),
-      runId,
-      capabilityId: "parser-authoring",
-      type: "parser-script",
-      schemaVersion: 1,
-      title: name,
-      summary: `Parser draft for ${topicFilter}`,
-      payload: {
-        editorPayload: {
-          name,
-          script,
-          suggestedTestPayloadHex: "01020304",
+      artifact: {
+        id: randomUUID(),
+        runId: input.runId,
+        capabilityId: "parser-authoring",
+        type: "parser-script",
+        schemaVersion: 1,
+        title: name,
+        summary,
+        payload: {
+          editorPayload: {
+            name,
+            script,
+            ...(suggestedTestPayloadHex ? { suggestedTestPayloadHex } : {}),
+          },
+          reviewPayload: {
+            summary: reviewSummary,
+            assumptions,
+            risks,
+            nextSteps,
+          },
+          suggestedTopicFilter: topicFilter,
+          sourceSampleSummary,
         },
-        reviewPayload: {
-          summary: `${generatedFromImages} Draft targets ${topicFilter}.`,
-          assumptions: [
-            "Input topic structure remains stable enough to derive the parser name.",
-            "The first parser version should preserve raw payload metadata for follow-up editing.",
-          ],
-          risks: [
-            "Payload field semantics still need validation in ParserLibrary test runs.",
-            "Image references may be insufficient for exact field naming without human review.",
-          ],
-          nextSteps: [
-            "Open the draft in ParserLibrary.",
-            "Run the suggested payload smoke test and adjust field extraction.",
-            "Save the parser once the topic filter and output shape are confirmed.",
-          ],
-        },
-        suggestedTopicFilter: topicFilter,
-        sourceSampleSummary: requestSummary,
+        createdAt: new Date().toISOString(),
       },
-      createdAt: new Date().toISOString(),
+      error: null,
     };
-  }
-
-  buildExecutePrompt(request: string, topicFilter: string, artifact: AgentArtifactDto) {
-    return `Generate a concise execute-mode summary for parser authoring.\nRequest: ${request}\nSuggested topic filter: ${topicFilter}\nArtifact title: ${artifact.title}`;
   }
 
   private createPlanStep(
@@ -215,5 +259,35 @@ export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
       .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
       .join(" ")
       .concat(" Parser");
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+
+    return value as Record<string, unknown>;
+  }
+
+  private readNonEmptyString(value: unknown): string | null {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  private readStringList(value: unknown, fallback: string[]) {
+    if (!Array.isArray(value)) {
+      return fallback;
+    }
+
+    const normalized = value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    return normalized.length > 0 ? normalized : fallback;
   }
 }

@@ -238,7 +238,6 @@ pub struct AgentSettingsDto {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
-    pub service_url: String,
 }
 
 impl Default for AgentSettingsDto {
@@ -249,7 +248,6 @@ impl Default for AgentSettingsDto {
             base_url: "https://api.openai.com/v1".into(),
             api_key: String::new(),
             model: "gpt-5.4".into(),
-            service_url: "http://127.0.0.1:8787".into(),
         }
     }
 }

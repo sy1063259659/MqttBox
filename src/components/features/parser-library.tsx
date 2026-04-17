@@ -23,6 +23,7 @@ interface ParserDraft {
   id?: string;
   name: string;
   script: string;
+  suggestedTestPayloadHex?: string;
 }
 
 interface ParserTestDraft {
@@ -34,16 +35,18 @@ function createDraft(
   parser?: MessageParserDto | null,
 ): ParserDraft {
   if (!parser) {
-    return {
-      name: "",
-      script: getDefaultParserScript(locale),
-    };
+      return {
+        name: "",
+        script: getDefaultParserScript(locale),
+        suggestedTestPayloadHex: "",
+      };
   }
 
   return {
     id: parser.id,
     name: parser.name,
     script: parser.script,
+    suggestedTestPayloadHex: "",
   };
 }
 
@@ -108,6 +111,10 @@ export function ParserLibrary() {
       id: parserDraft.id,
       name: parserDraft.name,
       script: parserDraft.script,
+      suggestedTestPayloadHex: parserDraft.suggestedTestPayloadHex,
+    });
+    setTestDraft({
+      payloadHex: parserDraft.suggestedTestPayloadHex ?? "",
     });
     setTestResult(null);
     clearParserDraft();
@@ -204,6 +211,7 @@ export function ParserLibrary() {
                         id: draft.id,
                         name: draft.name.trim(),
                         script: draft.script,
+                        suggestedTestPayloadHex: testDraft.payloadHex.trim() || undefined,
                       });
                       setSelectedParserId(saved.id);
                       setDraft(createDraft(locale, saved));

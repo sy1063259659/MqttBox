@@ -9,6 +9,20 @@ export interface CurrentWindowState {
   } | null;
 }
 
+const FALLBACK_WINDOW_STATE: CurrentWindowState = {
+  isWindowMaximized: false,
+  windowSize: null,
+};
+
+function hasTauriWindowRuntime() {
+  const target = globalThis as typeof globalThis & {
+    __TAURI_INTERNALS__?: unknown;
+    __TAURI__?: unknown;
+  };
+
+  return typeof window !== "undefined" && Boolean(target.__TAURI_INTERNALS__ || target.__TAURI__);
+}
+
 async function readCurrentWindowState(window: Window): Promise<CurrentWindowState> {
   const [isWindowMaximized, size] = await Promise.all([
     window.isMaximized(),
@@ -27,6 +41,11 @@ async function readCurrentWindowState(window: Window): Promise<CurrentWindowStat
 export async function subscribeCurrentWindowState(
   onChange: (state: CurrentWindowState) => void,
 ) {
+  if (!hasTauriWindowRuntime()) {
+    onChange(FALLBACK_WINDOW_STATE);
+    return () => undefined;
+  }
+
   const currentWindow = getCurrentWindow();
 
   const emitState = async () => {
@@ -44,13 +63,25 @@ export async function subscribeCurrentWindowState(
 }
 
 export async function minimizeCurrentWindow() {
+  if (!hasTauriWindowRuntime()) {
+    return;
+  }
+
   await getCurrentWindow().minimize();
 }
 
 export async function toggleMaximizeCurrentWindow() {
+  if (!hasTauriWindowRuntime()) {
+    return;
+  }
+
   await getCurrentWindow().toggleMaximize();
 }
 
 export async function closeCurrentWindow() {
+  if (!hasTauriWindowRuntime()) {
+    return;
+  }
+
   await getCurrentWindow().close();
 }

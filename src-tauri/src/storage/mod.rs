@@ -16,8 +16,12 @@ use crate::{
         MessageFilter, MessageHistoryPageDto, MessageParserDto, MessageParserInput,
         MessageRecordDto, SubscriptionDto, SubscriptionInput,
     },
-    parser::{build_payload_fields, execute_message_parser, pretty_json, MessageParserRuntimeInput},
+    parser::{
+        build_payload_fields, execute_message_parser, pretty_json, MessageParserRuntimeInput,
+    },
 };
+
+const AGENT_ENABLED_EXPLICITLY_SET_KEY: &str = "agentEnabledExplicitlySet";
 
 pub struct StorageService {
     conn: Connection,
@@ -438,7 +442,10 @@ impl StorageService {
         })?)
     }
 
-    pub fn get_connection_secret(&self, connection_id: &str) -> AppResult<Option<ConnectionSecretDto>> {
+    pub fn get_connection_secret(
+        &self,
+        connection_id: &str,
+    ) -> AppResult<Option<ConnectionSecretDto>> {
         let mut stmt = self.conn.prepare(
             "SELECT connection_id, username, password, passphrase
              FROM connection_secrets WHERE connection_id = ?1",
@@ -457,8 +464,14 @@ impl StorageService {
         Ok(None)
     }
 
-    pub fn save_connection(&self, profile: ConnectionProfileInput) -> AppResult<ConnectionProfileDto> {
-        let id = profile.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    pub fn save_connection(
+        &self,
+        profile: ConnectionProfileInput,
+    ) -> AppResult<ConnectionProfileDto> {
+        let id = profile
+            .id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = now_ms();
 
         let exists = self
@@ -644,8 +657,10 @@ impl StorageService {
     }
 
     pub fn delete_connection(&self, connection_id: &str) -> AppResult<()> {
-        self.conn
-            .execute("DELETE FROM connection_profiles WHERE id = ?1", [connection_id])?;
+        self.conn.execute(
+            "DELETE FROM connection_profiles WHERE id = ?1",
+            [connection_id],
+        )?;
         Ok(())
     }
 
@@ -669,7 +684,10 @@ impl StorageService {
         Ok(())
     }
 
-    pub fn list_subscriptions(&self, connection_id: Option<String>) -> AppResult<Vec<SubscriptionDto>> {
+    pub fn list_subscriptions(
+        &self,
+        connection_id: Option<String>,
+    ) -> AppResult<Vec<SubscriptionDto>> {
         let sql = if connection_id.is_some() {
             "SELECT id, connection_id, topic_filter, qos, parser_id, enabled, is_preset, note, created_at, updated_at
              FROM subscriptions WHERE connection_id = ?1 ORDER BY updated_at DESC"
@@ -703,12 +721,17 @@ impl StorageService {
         Ok(rows.flatten().collect())
     }
 
-    pub fn save_subscriptions(&self, subscriptions: Vec<SubscriptionInput>) -> AppResult<Vec<SubscriptionDto>> {
+    pub fn save_subscriptions(
+        &self,
+        subscriptions: Vec<SubscriptionInput>,
+    ) -> AppResult<Vec<SubscriptionDto>> {
         let now = now_ms();
         let mut saved = Vec::new();
 
         for subscription in subscriptions {
-            let id = subscription.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            let id = subscription
+                .id
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
             self.conn.execute(
                 "INSERT INTO subscriptions (
                      id, connection_id, topic_filter, qos, parser_id, enabled, is_preset, note, created_at, updated_at
@@ -791,23 +814,31 @@ impl StorageService {
                 name = excluded.name,
                 script = excluded.script,
                 updated_at = excluded.updated_at",
-            params![id, input.name, input.script, existing_created_at.unwrap_or(now), now],
+            params![
+                id,
+                input.name,
+                input.script,
+                existing_created_at.unwrap_or(now),
+                now
+            ],
         )?;
 
-        self.conn.query_row(
-            "SELECT id, name, script, created_at, updated_at
+        self.conn
+            .query_row(
+                "SELECT id, name, script, created_at, updated_at
              FROM message_parsers WHERE id = ?1",
-            [id],
-            |row| {
-                Ok(MessageParserDto {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    script: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                })
-            },
-        ).map_err(Into::into)
+                [id],
+                |row| {
+                    Ok(MessageParserDto {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        script: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
     }
 
     pub fn remove_message_parser(&self, parser_id: &str) -> AppResult<()> {
@@ -820,7 +851,10 @@ impl StorageService {
         Ok(())
     }
 
-    pub fn get_subscriptions_by_ids(&self, subscription_ids: &[String]) -> AppResult<Vec<SubscriptionDto>> {
+    pub fn get_subscriptions_by_ids(
+        &self,
+        subscription_ids: &[String],
+    ) -> AppResult<Vec<SubscriptionDto>> {
         let all = self.list_subscriptions(None)?;
         Ok(all
             .into_iter()
@@ -859,7 +893,10 @@ impl StorageService {
         )?;
 
         let settings = self.get_app_settings()?;
-        self.trim_message_history(&message.connection_id, settings.message_history_limit_per_connection)?;
+        self.trim_message_history(
+            &message.connection_id,
+            settings.message_history_limit_per_connection,
+        )?;
         Ok(())
     }
 
@@ -868,10 +905,7 @@ impl StorageService {
             return Ok(message);
         }
 
-        let maybe_parser = self.resolve_message_parser(
-            &message.connection_id,
-            &message.topic,
-        )?;
+        let maybe_parser = self.resolve_message_parser(&message.connection_id, &message.topic)?;
 
         if let Some(parser) = maybe_parser {
             let runtime_input = MessageParserRuntimeInput {
@@ -921,11 +955,7 @@ impl StorageService {
         }
 
         Ok(MessageHistoryPageDto {
-            next_offset: if has_more {
-                Some(offset + limit)
-            } else {
-                None
-            },
+            next_offset: if has_more { Some(offset + limit) } else { None },
             has_more,
             items: self.decorate_messages(items)?,
         })
@@ -971,30 +1001,31 @@ impl StorageService {
                 offset,
             ],
             |row| {
-            let payload_text = row.get::<_, String>(3)?;
-            let payload_base64 = row.get::<_, String>(4)?;
-            let raw_payload_hex = decode_payload_fields(&payload_base64, &payload_text).raw_payload_hex;
+                let payload_text = row.get::<_, String>(3)?;
+                let payload_base64 = row.get::<_, String>(4)?;
+                let raw_payload_hex =
+                    decode_payload_fields(&payload_base64, &payload_text).raw_payload_hex;
 
-            Ok(MessageRecordDto {
-                id: row.get(0)?,
-                connection_id: row.get(1)?,
-                topic: row.get(2)?,
-                payload_text,
-                payload_base64,
-                raw_payload_hex,
-                payload_type: row.get(5)?,
-                payload_size: row.get(6)?,
-                direction: row.get(7)?,
-                qos: row.get(8)?,
-                retain: row.get::<_, i64>(9)? == 1,
-                dup: row.get::<_, i64>(10)? == 1,
-                parser_id: None,
-                parsed_payload_json: None,
-                parse_error: None,
-                properties_json: row.get(11)?,
-                received_at: row.get(12)?,
-            })
-        },
+                Ok(MessageRecordDto {
+                    id: row.get(0)?,
+                    connection_id: row.get(1)?,
+                    topic: row.get(2)?,
+                    payload_text,
+                    payload_base64,
+                    raw_payload_hex,
+                    payload_type: row.get(5)?,
+                    payload_size: row.get(6)?,
+                    direction: row.get(7)?,
+                    qos: row.get(8)?,
+                    retain: row.get::<_, i64>(9)? == 1,
+                    dup: row.get::<_, i64>(10)? == 1,
+                    parser_id: None,
+                    parsed_payload_json: None,
+                    parse_error: None,
+                    properties_json: row.get(11)?,
+                    received_at: row.get(12)?,
+                })
+            },
         )?;
 
         Ok(rows.flatten().collect())
@@ -1064,11 +1095,15 @@ impl StorageService {
 
         for row in rows.flatten() {
             match row.0.as_str() {
-                "activeConnectionId" => settings.active_connection_id = serde_json::from_str(&row.1)?,
+                "activeConnectionId" => {
+                    settings.active_connection_id = serde_json::from_str(&row.1)?
+                }
                 "messageHistoryLimitPerConnection" => {
                     settings.message_history_limit_per_connection = serde_json::from_str(&row.1)?
                 }
-                "autoScrollMessages" => settings.auto_scroll_messages = serde_json::from_str(&row.1)?,
+                "autoScrollMessages" => {
+                    settings.auto_scroll_messages = serde_json::from_str(&row.1)?
+                }
                 "timestampFormat" => settings.timestamp_format = serde_json::from_str(&row.1)?,
                 "theme" => settings.theme = serde_json::from_str(&row.1)?,
                 "locale" => settings.locale = serde_json::from_str(&row.1)?,
@@ -1082,13 +1117,22 @@ impl StorageService {
     pub fn save_app_settings(&self, settings: &AppSettingsDto) -> AppResult<()> {
         let now = now_ms();
         let items = vec![
-            ("activeConnectionId", serde_json::to_string(&settings.active_connection_id)?),
+            (
+                "activeConnectionId",
+                serde_json::to_string(&settings.active_connection_id)?,
+            ),
             (
                 "messageHistoryLimitPerConnection",
                 serde_json::to_string(&settings.message_history_limit_per_connection)?,
             ),
-            ("autoScrollMessages", serde_json::to_string(&settings.auto_scroll_messages)?),
-            ("timestampFormat", serde_json::to_string(&settings.timestamp_format)?),
+            (
+                "autoScrollMessages",
+                serde_json::to_string(&settings.auto_scroll_messages)?,
+            ),
+            (
+                "timestampFormat",
+                serde_json::to_string(&settings.timestamp_format)?,
+            ),
             ("theme", serde_json::to_string(&settings.theme)?),
             ("locale", serde_json::to_string(&settings.locale)?),
         ];
@@ -1106,9 +1150,10 @@ impl StorageService {
 
     pub fn get_agent_settings(&self) -> AppResult<AgentSettingsDto> {
         let mut settings = AgentSettingsDto::default();
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key, value_json FROM app_settings WHERE key LIKE 'agent%' ORDER BY key ASC")?;
+        let mut enabled_explicitly_set = false;
+        let mut stmt = self.conn.prepare(
+            "SELECT key, value_json FROM app_settings WHERE key LIKE 'agent%' ORDER BY key ASC",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -1120,15 +1165,30 @@ impl StorageService {
                 "agentBaseUrl" => settings.base_url = serde_json::from_str(&row.1)?,
                 "agentApiKey" => settings.api_key = serde_json::from_str(&row.1)?,
                 "agentModel" => settings.model = serde_json::from_str(&row.1)?,
-                "agentServiceUrl" => settings.service_url = serde_json::from_str(&row.1)?,
+                AGENT_ENABLED_EXPLICITLY_SET_KEY => {
+                    enabled_explicitly_set = serde_json::from_str(&row.1)?
+                }
                 _ => {}
             }
+        }
+
+        if should_auto_enable_legacy_agent_settings(&settings, enabled_explicitly_set) {
+            settings.enabled = true;
+            self.save_agent_settings_internal(&settings, true)?;
         }
 
         Ok(settings)
     }
 
     pub fn save_agent_settings(&self, settings: &AgentSettingsDto) -> AppResult<()> {
+        self.save_agent_settings_internal(settings, true)
+    }
+
+    fn save_agent_settings_internal(
+        &self,
+        settings: &AgentSettingsDto,
+        enabled_explicitly_set: bool,
+    ) -> AppResult<()> {
         let now = now_ms();
         let items = vec![
             ("agentEnabled", serde_json::to_string(&settings.enabled)?),
@@ -1136,7 +1196,10 @@ impl StorageService {
             ("agentBaseUrl", serde_json::to_string(&settings.base_url)?),
             ("agentApiKey", serde_json::to_string(&settings.api_key)?),
             ("agentModel", serde_json::to_string(&settings.model)?),
-            ("agentServiceUrl", serde_json::to_string(&settings.service_url)?),
+            (
+                AGENT_ENABLED_EXPLICITLY_SET_KEY,
+                serde_json::to_string(&enabled_explicitly_set)?,
+            ),
         ];
 
         for (key, value) in items {
@@ -1228,17 +1291,38 @@ impl StorageService {
 
         Ok(None)
     }
-
 }
 
-fn compare_subscription_priority(left: &SubscriptionDto, right: &SubscriptionDto) -> std::cmp::Ordering {
+fn has_valid_agent_model_config(settings: &AgentSettingsDto) -> bool {
+    settings.provider.trim() == "openai"
+        && !settings.base_url.trim().is_empty()
+        && !settings.api_key.trim().is_empty()
+        && !settings.model.trim().is_empty()
+}
+
+fn should_auto_enable_legacy_agent_settings(
+    settings: &AgentSettingsDto,
+    enabled_explicitly_set: bool,
+) -> bool {
+    !enabled_explicitly_set && !settings.enabled && has_valid_agent_model_config(settings)
+}
+
+fn compare_subscription_priority(
+    left: &SubscriptionDto,
+    right: &SubscriptionDto,
+) -> std::cmp::Ordering {
     let left_segments = topic_filter_segment_count(&left.topic_filter);
     let right_segments = topic_filter_segment_count(&right.topic_filter);
 
     left_segments
         .cmp(&right_segments)
-        .then_with(|| right_wildcard_count(&right.topic_filter).cmp(&right_wildcard_count(&left.topic_filter)))
-        .then_with(|| topic_filter_literal_length(&left.topic_filter).cmp(&topic_filter_literal_length(&right.topic_filter)))
+        .then_with(|| {
+            right_wildcard_count(&right.topic_filter).cmp(&right_wildcard_count(&left.topic_filter))
+        })
+        .then_with(|| {
+            topic_filter_literal_length(&left.topic_filter)
+                .cmp(&topic_filter_literal_length(&right.topic_filter))
+        })
         .then_with(|| left.updated_at.cmp(&right.updated_at))
 }
 
@@ -1247,11 +1331,17 @@ fn topic_filter_segment_count(topic_filter: &str) -> usize {
 }
 
 fn right_wildcard_count(topic_filter: &str) -> usize {
-    topic_filter.chars().filter(|char| *char == '+' || *char == '#').count()
+    topic_filter
+        .chars()
+        .filter(|char| *char == '+' || *char == '#')
+        .count()
 }
 
 fn topic_filter_literal_length(topic_filter: &str) -> usize {
-    topic_filter.chars().filter(|char| *char != '+' && *char != '#').count()
+    topic_filter
+        .chars()
+        .filter(|char| *char != '+' && *char != '#')
+        .count()
 }
 
 fn mqtt_topic_matches(topic_filter: &str, topic: &str) -> bool {
@@ -1304,4 +1394,41 @@ fn now_ms() -> i64 {
 
 fn escape_csv(value: &str) -> String {
     value.replace('"', "\"\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_auto_enable_legacy_agent_settings, AgentSettingsDto};
+
+    fn configured_agent_settings(enabled: bool) -> AgentSettingsDto {
+        AgentSettingsDto {
+            enabled,
+            provider: "openai".into(),
+            base_url: "https://api.example.com/v1".into(),
+            api_key: "test-key".into(),
+            model: "gpt-5.4".into(),
+        }
+    }
+
+    #[test]
+    fn auto_enables_legacy_disabled_settings_once_when_model_config_is_complete() {
+        let settings = configured_agent_settings(false);
+
+        assert!(should_auto_enable_legacy_agent_settings(&settings, false));
+    }
+
+    #[test]
+    fn does_not_auto_enable_after_enabled_preference_has_been_explicitly_saved() {
+        let settings = configured_agent_settings(false);
+
+        assert!(!should_auto_enable_legacy_agent_settings(&settings, true));
+    }
+
+    #[test]
+    fn does_not_auto_enable_incomplete_model_settings() {
+        let mut settings = configured_agent_settings(false);
+        settings.api_key.clear();
+
+        assert!(!should_auto_enable_legacy_agent_settings(&settings, false));
+    }
 }

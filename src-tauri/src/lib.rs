@@ -1,4 +1,5 @@
 mod agent;
+mod agent_service;
 mod app_state;
 mod commands;
 mod error;
@@ -7,15 +8,26 @@ mod mqtt;
 mod parser;
 mod storage;
 
+use agent_service::ManagedAgentService;
 use app_state::SharedState;
-use tauri::Manager;
+use std::sync::{Arc, Mutex};
+use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .setup(|app| {
+    let managed_agent_service = Arc::new(Mutex::new(ManagedAgentService::new()));
+    let agent_service_for_setup = Arc::clone(&managed_agent_service);
+    let agent_service_for_run = Arc::clone(&managed_agent_service);
+
+    let app = tauri::Builder::default()
+        .setup(move |app| {
             let shared_state = SharedState::new(app.handle())?;
             app.manage(shared_state);
+            if let Ok(mut service) = agent_service_for_setup.lock() {
+                if let Err(error) = service.ensure_running(app.handle()) {
+                    eprintln!("[agent-service] failed to auto-start local service: {error}");
+                }
+            }
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -54,6 +66,14 @@ pub fn run() {
             commands::save_agent_settings,
             commands::save_app_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(move |_app_handle, event| {
+        if matches!(event, RunEvent::Exit) {
+            if let Ok(mut service) = agent_service_for_run.lock() {
+                service.shutdown();
+            }
+        }
+    });
 }

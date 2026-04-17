@@ -19,6 +19,10 @@ export class ArtifactStore {
     return artifact;
   }
 
+  list(): AgentArtifactDto[] {
+    return [...this.items.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
   listByRun(runId: string): AgentArtifactDto[] {
     return [...this.items.values()].filter((artifact) => artifact.runId === runId);
   }

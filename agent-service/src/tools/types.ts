@@ -1,9 +1,10 @@
 import type { ToolDescriptor } from "@agent-contracts";
 import type { TypedEventBus } from "../harness/event-bus.js";
+import type { ZodTypeAny } from "zod";
 
 export interface ToolContext {
   sessionId: string;
-  runId: string;
+  runId: string | null;
   eventBus: TypedEventBus;
   stepId?: string | null;
 }
@@ -18,6 +19,7 @@ export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  runtimeSchema?: ZodTypeAny;
   handler: (input: unknown, context: ToolContext) => Promise<ToolResult>;
   timeoutMs?: number;
 }

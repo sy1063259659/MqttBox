@@ -6,20 +6,26 @@ use crate::{
     error::AppError,
     models::{
         AgentContextDto, AgentEventPayload, AgentSettingsDto, AgentToolDescriptor, AppSettingsDto,
-        ConnectionEventPayload, ConnectionFolderDto, ConnectionProfileDto,
-        ConnectionProfileInput, ConnectionReorderItem, ConnectionSecretDto,
-        ConnectionTestResultDto, ExportRequest, MessageFilter, MessageHistoryPageDto,
-        MessageParserDto, MessageParserInput, MessageParserTestRequest,
-        MessageParserTestResultDto, MessageRecordDto, PublishRequest, SubscriptionDto,
-        SubscriptionInput,
+        ConnectionEventPayload, ConnectionFolderDto, ConnectionProfileDto, ConnectionProfileInput,
+        ConnectionReorderItem, ConnectionSecretDto, ConnectionTestResultDto, ExportRequest,
+        MessageFilter, MessageHistoryPageDto, MessageParserDto, MessageParserInput,
+        MessageParserTestRequest, MessageParserTestResultDto, MessageRecordDto, PublishRequest,
+        SubscriptionDto, SubscriptionInput,
     },
     mqtt,
     parser::{build_payload_fields, test_message_parser as run_message_parser_test},
 };
 
 #[tauri::command]
-pub fn list_connections(state: State<'_, SharedState>) -> Result<Vec<ConnectionProfileDto>, String> {
-    state.storage.lock().unwrap().list_connections().map_err(to_string)
+pub fn list_connections(
+    state: State<'_, SharedState>,
+) -> Result<Vec<ConnectionProfileDto>, String> {
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .list_connections()
+        .map_err(to_string)
 }
 
 #[tauri::command]
@@ -52,7 +58,12 @@ pub fn create_connection(
     state: State<'_, SharedState>,
     profile: ConnectionProfileInput,
 ) -> Result<ConnectionProfileDto, String> {
-    state.storage.lock().unwrap().save_connection(profile).map_err(to_string)
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .save_connection(profile)
+        .map_err(to_string)
 }
 
 #[tauri::command]
@@ -60,7 +71,12 @@ pub fn update_connection(
     state: State<'_, SharedState>,
     profile: ConnectionProfileInput,
 ) -> Result<ConnectionProfileDto, String> {
-    state.storage.lock().unwrap().save_connection(profile).map_err(to_string)
+    state
+        .storage
+        .lock()
+        .unwrap()
+        .save_connection(profile)
+        .map_err(to_string)
 }
 
 #[tauri::command]
@@ -194,7 +210,12 @@ pub async fn connect_broker(
         .collect();
 
     if !enabled.is_empty() {
-        let client = state.mqtt.lock().unwrap().client(&connection_id).map_err(to_string)?;
+        let client = state
+            .mqtt
+            .lock()
+            .unwrap()
+            .client(&connection_id)
+            .map_err(to_string)?;
         mqtt::subscribe_many(client, enabled)
             .await
             .map_err(|error| format!("恢复订阅失败：{}", to_string(error)))?;
@@ -340,7 +361,12 @@ pub async fn subscribe_topics(
         .map_err(to_string)?;
 
     if state.mqtt.lock().unwrap().is_connected(&connection_id) {
-        let client = state.mqtt.lock().unwrap().client(&connection_id).map_err(to_string)?;
+        let client = state
+            .mqtt
+            .lock()
+            .unwrap()
+            .client(&connection_id)
+            .map_err(to_string)?;
         let topics = saved
             .iter()
             .filter(|item| item.enabled)
@@ -368,7 +394,12 @@ pub async fn unsubscribe_topics(
         .map_err(to_string)?;
 
     if state.mqtt.lock().unwrap().is_connected(&connection_id) {
-        let client = state.mqtt.lock().unwrap().client(&connection_id).map_err(to_string)?;
+        let client = state
+            .mqtt
+            .lock()
+            .unwrap()
+            .client(&connection_id)
+            .map_err(to_string)?;
         let topics = subscriptions
             .iter()
             .map(|subscription| subscription.topic_filter.clone())
@@ -424,7 +455,12 @@ pub async fn set_subscription_enabled(
         .ok_or_else(|| "订阅状态更新失败".to_string())?;
 
     if state.mqtt.lock().unwrap().is_connected(&connection_id) {
-        let client = state.mqtt.lock().unwrap().client(&connection_id).map_err(to_string)?;
+        let client = state
+            .mqtt
+            .lock()
+            .unwrap()
+            .client(&connection_id)
+            .map_err(to_string)?;
         if enabled {
             mqtt::subscribe_many(client, vec![(updated.topic_filter.clone(), updated.qos)])
                 .await

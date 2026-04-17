@@ -7,11 +7,7 @@ import type {
   AgentSessionDto,
   AgentSessionMode,
 } from "@agent-contracts";
-import {
-  getAgentSettings,
-  peekCachedAgentSettings,
-  type AgentSettingsDto,
-} from "@/services/tauri";
+import type { AgentSettingsDto } from "@/services/tauri";
 
 interface AgentSessionResponse {
   session: AgentSessionDto;
@@ -63,34 +59,59 @@ export interface AgentServiceRequestError extends Error {
 
 const DEFAULT_AGENT_SERVICE_URL = "http://127.0.0.1:8787";
 
-async function resolveAgentSettings() {
-  return peekCachedAgentSettings() ?? (await getAgentSettings().catch(() => null));
-}
-
 async function resolveAgentServiceUrl(explicit?: string) {
   if (explicit?.trim()) {
     return explicit.trim().replace(/\/+$/, "");
   }
 
-  const settings = await resolveAgentSettings();
   const configured =
-    settings?.serviceUrl?.trim() ||
-    (typeof import.meta !== "undefined" && import.meta.env?.VITE_AGENT_SERVICE_URL
+    typeof import.meta !== "undefined" && import.meta.env?.VITE_AGENT_SERVICE_URL
       ? import.meta.env.VITE_AGENT_SERVICE_URL
-      : "");
+      : "";
 
   return (configured || DEFAULT_AGENT_SERVICE_URL).replace(/\/+$/, "");
 }
 
+function createUnreachableAgentServiceError(
+  serviceUrl: string,
+  cause: unknown,
+): AgentServiceRequestError {
+  const error = new Error(
+    `Local agent service is not running at ${serviceUrl}. Start the local agent service first.`,
+  ) as AgentServiceRequestError;
+  error.code = "agent_service_unreachable";
+  if (cause instanceof Error && cause.stack) {
+    error.stack = cause.stack;
+  }
+  return error;
+}
+
+export function isAgentServiceUnreachableError(
+  error: unknown,
+): error is AgentServiceRequestError {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as AgentServiceRequestError).code === "agent_service_unreachable"
+  );
+}
+
 async function requestJson<T>(path: string, init?: RequestInit & { serviceUrl?: string }): Promise<T> {
   const serviceUrl = await resolveAgentServiceUrl(init?.serviceUrl);
-  const response = await fetch(`${serviceUrl}${path}`, {
-    ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
+  let response: Response;
+
+  try {
+    response = await fetch(`${serviceUrl}${path}`, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    throw createUnreachableAgentServiceError(serviceUrl, error);
+  }
 
   const payload = (await response.json().catch(() => null)) as
     | { error?: string; message?: string }
@@ -138,19 +159,25 @@ export async function streamAgentMessage(input: {
   onEvent: (event: AgentEvent) => void;
 }) {
   const serviceUrl = await resolveAgentServiceUrl();
-  const response = await fetch(
-    `${serviceUrl}/sessions/${encodeURIComponent(input.sessionId)}/messages/stream`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${serviceUrl}/sessions/${encodeURIComponent(input.sessionId)}/messages/stream`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          content: input.content,
+          attachments: input.attachments,
+        }),
       },
-      body: JSON.stringify({
-        content: input.content,
-        attachments: input.attachments,
-      }),
-    },
-  );
+    );
+  } catch (error) {
+    throw createUnreachableAgentServiceError(serviceUrl, error);
+  }
 
   if (!response.ok || !response.body) {
     const payload = (await response.json().catch(() => null)) as
@@ -250,7 +277,6 @@ export async function resolveAgentApproval(input: {
 export async function syncAgentServiceConfig(settings: AgentSettingsDto) {
   return requestJson<{ ok: true; settings: Record<string, unknown> }>("/config", {
     method: "POST",
-    serviceUrl: settings.serviceUrl,
     body: JSON.stringify({
       provider: settings.provider,
       baseUrl: settings.baseUrl,

@@ -44,8 +44,15 @@ export interface AgentSettingsDto {
   baseUrl: string;
   apiKey: string;
   model: string;
-  serviceUrl: string;
 }
+
+export const defaultAgentSettings: AgentSettingsDto = {
+  enabled: false,
+  provider: "openai",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: "",
+  model: "gpt-5.4",
+};
 
 export interface ConnectionTestResultDto {
   ok: boolean;
@@ -63,6 +70,45 @@ export type AgentEventPayload = LegacyAgentStatusEvent | AgentEvent;
 
 let cachedAppSettings: AppSettingsDto | null = null;
 let cachedAgentSettings: AgentSettingsDto | null = null;
+
+export function normalizeAgentSettings(
+  settings?: Partial<AgentSettingsDto> | null,
+): AgentSettingsDto {
+  return {
+    enabled:
+      typeof settings?.enabled === "boolean"
+        ? settings.enabled
+        : defaultAgentSettings.enabled,
+    provider:
+      settings?.provider === "openai"
+        ? settings.provider
+        : defaultAgentSettings.provider,
+    baseUrl:
+      typeof settings?.baseUrl === "string" && settings.baseUrl.trim().length > 0
+        ? settings.baseUrl
+        : defaultAgentSettings.baseUrl,
+    apiKey:
+      typeof settings?.apiKey === "string"
+        ? settings.apiKey
+        : defaultAgentSettings.apiKey,
+    model:
+      typeof settings?.model === "string" && settings.model.trim().length > 0
+        ? settings.model
+        : defaultAgentSettings.model,
+  };
+}
+
+export function hasValidAgentModelConfig(
+  settings?: Partial<AgentSettingsDto> | null,
+): boolean {
+  const normalized = normalizeAgentSettings(settings);
+  return (
+    normalized.provider === "openai" &&
+    normalized.baseUrl.trim().length > 0 &&
+    normalized.apiKey.trim().length > 0 &&
+    normalized.model.trim().length > 0
+  );
+}
 
 export async function listConnections() {
   return invoke<ConnectionProfileDto[]>("list_connections");
@@ -219,7 +265,7 @@ export async function getAppSettings() {
 }
 
 export async function getAgentSettings() {
-  const settings = await invoke<AgentSettingsDto>("get_agent_settings");
+  const settings = normalizeAgentSettings(await invoke<AgentSettingsDto>("get_agent_settings"));
   cachedAgentSettings = settings;
   return settings;
 }
@@ -231,7 +277,7 @@ export async function saveAppSettings(settings: AppSettingsDto) {
 
 export async function saveAgentSettings(settings: AgentSettingsDto) {
   await invoke<void>("save_agent_settings", { settings });
-  cachedAgentSettings = settings;
+  cachedAgentSettings = normalizeAgentSettings(settings);
 }
 
 export function peekCachedAppSettings() {
@@ -239,7 +285,7 @@ export function peekCachedAppSettings() {
 }
 
 export function peekCachedAgentSettings() {
-  return cachedAgentSettings;
+  return cachedAgentSettings ? normalizeAgentSettings(cachedAgentSettings) : null;
 }
 
 export async function updateAppSettings(patch: Partial<AppSettingsDto>) {

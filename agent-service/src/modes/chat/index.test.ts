@@ -1,24 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModeHandlerDeps, ModeInput } from "../types.js";
+import { ToolRegistry } from "../../tools/registry.js";
 import { ChatModeHandler } from "./index.js";
 
 describe("ChatModeHandler", () => {
-  const generate = vi.fn();
+  const runChat = vi.fn();
   const getSystemPrompt = vi.fn();
   const eventBus = { publish: vi.fn(), subscribe: vi.fn(), subscribeAll: vi.fn() };
   const toolRunner = { execute: vi.fn() };
+  const toolRegistry = new ToolRegistry();
   const deps = {
     modelClient: {
       provider: "mock",
-      generate,
+      generate: vi.fn(),
       configure: vi.fn(),
+      getRuntimeConfig: vi.fn(),
       getConfigSummary: vi.fn(),
     },
     promptRegistry: {
       getSystemPrompt,
     },
     eventBus,
+    toolRegistry,
     toolRunner,
+    deepAgentsAdapter: {
+      runtime: "deepagentsjs-test",
+      initialize: vi.fn(),
+      runChat,
+      runExecute: vi.fn(),
+    },
   } as unknown as ModeHandlerDeps;
 
   const input: ModeInput = {
@@ -48,29 +58,34 @@ describe("ChatModeHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getSystemPrompt.mockReturnValue("chat system prompt");
-    generate.mockResolvedValue({ content: "stream complete" });
+    runChat.mockResolvedValue({ assistantText: "stream complete" });
   });
 
-  it("injects the chat system prompt and returns model content", async () => {
+  it("injects the chat system prompt and returns the runtime result", async () => {
     const handler = new ChatModeHandler(deps);
 
-    await expect(handler.respond(input)).resolves.toBe("stream complete");
+    await expect(handler.respond(input)).resolves.toEqual({ assistantText: "stream complete" });
 
     expect(getSystemPrompt).toHaveBeenCalledWith("chat", "topic-diagnosis");
-    expect(generate).toHaveBeenCalledWith({
-      mode: "chat",
+    expect(runChat).toHaveBeenCalledWith({
+      sessionId: input.session.id,
+      runId: null,
       systemPrompt: "chat system prompt",
       userMessage: input.message,
       attachments: input.attachments,
       onDelta: input.onDelta,
+      eventBus,
+      toolRunner,
+      toolDefinitions: [],
+      modelClient: deps.modelClient,
     });
   });
 
   it("forwards streaming deltas through the provided callback", async () => {
-    generate.mockImplementationOnce(async (request) => {
+    runChat.mockImplementationOnce(async (request) => {
       request.onDelta?.("part-1");
       request.onDelta?.("part-2");
-      return { content: "final" };
+      return { assistantText: "final" };
     });
     const onDelta = vi.fn();
     const handler = new ChatModeHandler(deps);
@@ -87,17 +102,17 @@ describe("ChatModeHandler", () => {
     await handler.respond({ ...input, capabilityId: undefined, attachments: [] });
 
     expect(getSystemPrompt).toHaveBeenCalledWith("chat", undefined);
-    expect(generate).toHaveBeenCalledWith(
+    expect(runChat).toHaveBeenCalledWith(
       expect.objectContaining({
         attachments: [],
       }),
     );
   });
 
-  it("propagates model errors", async () => {
+  it("propagates runtime errors", async () => {
     const handler = new ChatModeHandler(deps);
-    const error = new Error("model unavailable");
-    generate.mockRejectedValueOnce(error);
+    const error = new Error("runtime unavailable");
+    runChat.mockRejectedValueOnce(error);
 
     await expect(handler.respond(input)).rejects.toThrow(error);
   });

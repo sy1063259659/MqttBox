@@ -4,7 +4,6 @@ import type {
   AgentAttachmentDto,
   AgentEvent,
   AgentEventEnvelope,
-  AgentServiceConfigDto,
   AgentSessionMode,
   AgentSafetyLevel,
   ApprovalRequestDto,
@@ -31,10 +30,38 @@ import {
 } from "@/services/agent-service";
 import { getAgentContext, listAgentTools } from "@/services/tauri";
 
+type PendingAssistantPhase =
+  | "sending"
+  | "analyzing"
+  | "planning"
+  | "preparing"
+  | "waiting_for_approval";
+
+interface PendingAssistantState {
+  userMessageId: string;
+  runId: string | null;
+  phase: PendingAssistantPhase;
+  detail: string | null;
+  createdAt: string;
+}
+
+const FALLBACK_RUN_STATUS: AgentStore["runStatus"] = "idle";
+const FALLBACK_MODE: AgentSessionMode = "chat";
+const FALLBACK_SAFETY: AgentSafetyLevel = "confirm";
+const TERMINAL_RUN_STATUSES = new Set<RunStatus>(["completed", "failed", "cancelled"]);
+const FALLBACK_TIMELINE: AgentHarnessState["timeline"] = {
+  activeRunId: null,
+  runs: [],
+  latestPlan: null,
+};
+
 interface AgentStore extends AgentHarnessState {
   tools: AgentToolDescriptor[];
   context: AgentContextDto | null;
   draftPrompt: string;
+  isSubmitting: boolean;
+  pendingAssistantState: PendingAssistantState | null;
+  activePhaseSummary: PendingAssistantPhase | null;
   loadTools: () => Promise<void>;
   loadContext: (connectionId?: string | null) => Promise<void>;
   loadServiceHealth: () => Promise<void>;
@@ -53,22 +80,51 @@ interface AgentStore extends AgentHarnessState {
   setStatusMessage: (message: string | null) => void;
 }
 
-const FALLBACK_RUN_STATUS: AgentStore["runStatus"] = "idle";
-const FALLBACK_MODE: AgentSessionMode = "chat";
-const FALLBACK_SAFETY: AgentSafetyLevel = "confirm";
-const FALLBACK_TIMELINE: AgentHarnessState["timeline"] = {
-  activeRunId: null,
-  runs: [],
-  latestPlan: null,
-};
-
 function nowIso() {
   return new Date().toISOString();
+}
+
+function attachmentsMatch(left: AgentAttachmentDto[], right: AgentAttachmentDto[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((item, index) => {
+    const candidate = right[index];
+    return (
+      item.kind === candidate.kind &&
+      item.mimeType === candidate.mimeType &&
+      item.filename === candidate.filename &&
+      item.byteSize === candidate.byteSize &&
+      item.dataUrl === candidate.dataUrl
+    );
+  });
+}
+
+function matchOptimisticMessageIndex(messages: AgentThreadMessage[], message: AgentThreadMessage) {
+  return messages.findIndex(
+    (item) =>
+      item.isOptimistic &&
+      item.role === message.role &&
+      item.content === message.content &&
+      item.mode === message.mode &&
+      item.safetyLevel === message.safetyLevel &&
+      attachmentsMatch(item.attachments, message.attachments),
+  );
 }
 
 function upsertMessage(messages: AgentThreadMessage[], message: AgentThreadMessage) {
   const index = messages.findIndex((item) => item.id === message.id);
   if (index < 0) {
+    const optimisticIndex = matchOptimisticMessageIndex(messages, message);
+    if (optimisticIndex >= 0) {
+      const next = [...messages];
+      next[optimisticIndex] = {
+        ...message,
+        isOptimistic: false,
+      };
+      return next;
+    }
     return [...messages, message];
   }
 
@@ -92,6 +148,26 @@ function mapStatusToRunState(status: RunStatus): AgentStore["runStatus"] {
   return status;
 }
 
+function isRunTerminal(status: AgentStore["runStatus"]) {
+  return status === "idle" || TERMINAL_RUN_STATUSES.has(status as RunStatus);
+}
+
+function getPendingPhaseFromRunStatus(status: RunStatus): PendingAssistantPhase | null {
+  if (status === "planning") {
+    return "planning";
+  }
+  if (status === "awaiting_approval") {
+    return "waiting_for_approval";
+  }
+  if (status === "producing_artifact") {
+    return "preparing";
+  }
+  if (status === "queued" || status === "awaiting_tool" || status === "running") {
+    return "analyzing";
+  }
+  return null;
+}
+
 function resetRuntimeState() {
   return {
     session: null,
@@ -100,10 +176,12 @@ function resetRuntimeState() {
     approvals: [],
     approvalHistory: [],
     artifacts: [],
-    serviceConfig: null as AgentServiceConfigDto | null,
     runStatus: FALLBACK_RUN_STATUS,
     transportFlavor: "unknown" as const,
     statusMessage: null,
+    isSubmitting: false,
+    pendingAssistantState: null,
+    activePhaseSummary: null,
   };
 }
 
@@ -141,6 +219,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   runStatus: FALLBACK_RUN_STATUS,
   statusMessage: null,
   draftPrompt: "",
+  isSubmitting: false,
+  pendingAssistantState: null,
+  activePhaseSummary: null,
   async loadTools() {
     try {
       const tools = await listAgentTools();
@@ -171,7 +252,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       set({
         capabilities: health.capabilities,
         statusMessage: !health.model?.enabled
-          ? "Agent is disabled"
+          ? "Agent model is disabled"
           : !health.model?.configured
             ? "Agent service is reachable, but the model is not configured"
             : "Agent service is ready",
@@ -198,6 +279,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((state) => ({
       mode,
       ...resetRuntimeState(),
+      serviceConfig: state.serviceConfig,
       statusMessage:
         state.mode === mode ? state.statusMessage : "Mode changed, next send will start a new session",
     }));
@@ -206,6 +288,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((state) => ({
       safetyLevel,
       ...resetRuntimeState(),
+      serviceConfig: state.serviceConfig,
       statusMessage:
         state.safetyLevel === safetyLevel
           ? state.statusMessage
@@ -218,12 +301,47 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   async submitDraftMessage() {
     const state = get();
     const content = state.draftPrompt.trim();
-    if (!content) {
+    const activeRun =
+      state.timeline.activeRunId != null
+        ? state.timeline.runs.find((item) => item.id === state.timeline.activeRunId) ?? null
+        : state.timeline.runs[0] ?? null;
+
+    if (!content || state.isSubmitting || !isRunTerminal(activeRun?.status ?? state.runStatus)) {
       return;
     }
 
+    const createdAt = nowIso();
+    const attachmentsSnapshot = [...state.draftAttachments];
+    const optimisticMessageId = `local-user-${crypto.randomUUID()}`;
+    const optimisticMessage: AgentThreadMessage = {
+      id: optimisticMessageId,
+      role: "user",
+      content,
+      mode: state.mode,
+      safetyLevel: state.safetyLevel,
+      createdAt,
+      attachments: attachmentsSnapshot,
+      runId: null,
+      isStreaming: false,
+      isOptimistic: true,
+    };
+
     try {
-      set({ statusMessage: "Sending to agent service..." });
+      set({
+        messages: upsertMessage(state.messages, optimisticMessage),
+        draftPrompt: "",
+        draftAttachments: [],
+        isSubmitting: true,
+        pendingAssistantState: {
+          userMessageId: optimisticMessageId,
+          runId: null,
+          phase: "sending",
+          detail: null,
+          createdAt,
+        },
+        activePhaseSummary: "sending",
+        statusMessage: null,
+      });
 
       let session = state.session;
       if (!session) {
@@ -238,25 +356,38 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         }
       }
 
-      const done = await streamAgentMessage({
+      await streamAgentMessage({
         sessionId: session.id,
         content,
-        attachments: state.draftAttachments,
+        attachments: attachmentsSnapshot,
         onEvent: (event) => {
           get().applyIncomingEvent(event);
         },
       });
 
-      set({
-        draftPrompt: "",
-        draftAttachments: [],
-        statusMessage: `Agent stream completed (${done.assistantMessageId})`,
-      });
+      set((current) => ({
+        isSubmitting: false,
+        pendingAssistantState:
+          current.pendingAssistantState && current.pendingAssistantState.runId == null
+            ? null
+            : current.pendingAssistantState,
+        activePhaseSummary:
+          current.pendingAssistantState && current.pendingAssistantState.runId == null
+            ? null
+            : current.activePhaseSummary,
+        statusMessage: current.runStatus === "failed" ? current.statusMessage : null,
+      }));
     } catch (error) {
-      set({
+      set((current) => ({
+        isSubmitting: false,
+        pendingAssistantState: null,
+        activePhaseSummary: null,
         statusMessage:
           error instanceof Error ? error.message : "Failed to talk to agent service",
-      });
+        messages: current.messages.map((message) =>
+          message.id === optimisticMessageId ? { ...message, isOptimistic: false } : message,
+        ),
+      }));
     }
   },
   addDraftAttachments(attachments) {
@@ -321,7 +452,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           mode: incoming.payload.session.mode,
           safetyLevel: incoming.payload.session.safetyLevel,
           transportFlavor: "contract" as const,
-          statusMessage: "Session started",
+          statusMessage: state.statusMessage,
         };
       }
 
@@ -336,10 +467,29 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           attachments: incoming.payload.attachments ?? [],
           runId: incoming.runId ?? null,
           isStreaming: false,
+          isOptimistic: false,
         };
 
+        const reconciledMessages = upsertMessage(state.messages, nextMessage);
+        const matchingOptimistic = state.messages.find(
+          (item) =>
+            item.isOptimistic &&
+            item.role === nextMessage.role &&
+            item.content === nextMessage.content &&
+            item.mode === nextMessage.mode &&
+            item.safetyLevel === nextMessage.safetyLevel &&
+            attachmentsMatch(item.attachments, nextMessage.attachments),
+        );
+
         return {
-          messages: upsertMessage(state.messages, nextMessage),
+          messages: reconciledMessages,
+          pendingAssistantState:
+            matchingOptimistic && state.pendingAssistantState?.userMessageId === matchingOptimistic.id
+              ? {
+                  ...state.pendingAssistantState,
+                  userMessageId: nextMessage.id,
+                }
+              : state.pendingAssistantState,
           transportFlavor: "contract" as const,
         };
       }
@@ -347,6 +497,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       if (incoming.type === "run.started") {
         const run = incoming.payload.run;
         const currentRun = state.timeline.runs.find((item) => item.id === run.id);
+        const phase = getPendingPhaseFromRunStatus(run.status);
         return {
           timeline: {
             ...state.timeline,
@@ -361,6 +512,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             }),
           },
           runStatus: run.status,
+          pendingAssistantState:
+            state.pendingAssistantState == null
+              ? null
+              : {
+                  ...state.pendingAssistantState,
+                  runId: run.id,
+                  phase: phase ?? state.pendingAssistantState.phase,
+                },
+          activePhaseSummary: phase ?? state.activePhaseSummary,
           transportFlavor: "contract" as const,
         };
       }
@@ -372,13 +532,27 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             : state.timeline.runs.map((run) =>
                 run.id === incoming.runId ? { ...run, status: incoming.payload.status } : run,
               );
+        const phase = getPendingPhaseFromRunStatus(incoming.payload.status);
         return {
           timeline: {
             ...state.timeline,
             runs: nextRuns,
           },
           runStatus: incoming.payload.status,
-          statusMessage: incoming.payload.message ?? state.statusMessage,
+          statusMessage:
+            incoming.payload.status === "failed" || incoming.payload.status === "cancelled"
+              ? incoming.payload.message ?? state.statusMessage
+              : state.statusMessage,
+          pendingAssistantState:
+            phase == null || state.pendingAssistantState == null
+              ? state.pendingAssistantState
+              : {
+                  ...state.pendingAssistantState,
+                  runId: incoming.runId ?? state.pendingAssistantState.runId,
+                  phase,
+                  detail: incoming.payload.message ?? state.pendingAssistantState.detail,
+                },
+          activePhaseSummary: phase ?? state.activePhaseSummary,
           transportFlavor: "contract" as const,
         };
       }
@@ -400,6 +574,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             }),
           },
           runStatus: run.status,
+          isSubmitting: false,
+          pendingAssistantState: null,
+          activePhaseSummary: null,
           transportFlavor: "contract" as const,
         };
       }
@@ -426,6 +603,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
         return {
           messages: upsertMessage(state.messages, next),
+          isSubmitting: false,
+          pendingAssistantState: null,
+          activePhaseSummary: null,
           transportFlavor: "contract" as const,
         };
       }
@@ -457,6 +637,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         return {
           messages: upsertMessage(state.messages, next),
           transportFlavor: "contract" as const,
+          isSubmitting: false,
+          pendingAssistantState: null,
+          activePhaseSummary: null,
+          statusMessage: null,
           runStatus: incoming.runId == null ? state.runStatus : currentRun?.status ?? state.runStatus,
         };
       }
@@ -490,6 +674,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
               steps: plan.steps,
             }),
           },
+          pendingAssistantState:
+            state.pendingAssistantState == null
+              ? null
+              : {
+                  ...state.pendingAssistantState,
+                  runId: plan.runId,
+                  phase: "planning",
+                  detail: plan.steps[0]?.title ?? plan.goal,
+                },
+          activePhaseSummary: state.pendingAssistantState ? "planning" : state.activePhaseSummary,
           transportFlavor: "contract" as const,
         };
       }
@@ -533,6 +727,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             : nextSteps.every((item) => item.status === "completed")
               ? "completed"
               : "running";
+        const phase =
+          nextRunStatus === "failed"
+            ? null
+            : state.runStatus === "producing_artifact"
+              ? "preparing"
+              : "planning";
 
         return {
           timeline: {
@@ -549,6 +749,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             incoming.runId == null || state.timeline.activeRunId !== incoming.runId
               ? state.runStatus
               : mapStatusToRunState(state.runStatus === "idle" ? nextRunStatus : state.runStatus),
+          pendingAssistantState:
+            phase == null || state.pendingAssistantState == null
+              ? state.pendingAssistantState
+              : {
+                  ...state.pendingAssistantState,
+                  runId: step.runId,
+                  phase,
+                  detail: step.title,
+                },
+          activePhaseSummary: phase ?? state.activePhaseSummary,
           transportFlavor: "contract" as const,
         };
       }
@@ -559,6 +769,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
         return {
           approvals: existing ? state.approvals : [request, ...state.approvals],
+          isSubmitting: false,
+          pendingAssistantState:
+            state.pendingAssistantState == null
+              ? null
+              : {
+                  ...state.pendingAssistantState,
+                  runId: request.runId,
+                  phase: "waiting_for_approval",
+                  detail: request.actionSummary ?? request.title,
+                },
+          activePhaseSummary: state.pendingAssistantState
+            ? "waiting_for_approval"
+            : state.activePhaseSummary,
           transportFlavor: "contract" as const,
         };
       }
@@ -580,10 +803,22 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           approvalHistory: [resolution, ...state.approvalHistory],
           statusMessage:
             incoming.payload.outcome === "approved"
-              ? "Approval accepted"
+              ? null
               : incoming.payload.outcome === "rejected"
                 ? "Approval rejected"
                 : "Approval expired",
+          pendingAssistantState:
+            incoming.payload.outcome === "approved" && state.pendingAssistantState != null
+              ? {
+                  ...state.pendingAssistantState,
+                  phase: "preparing",
+                  detail: null,
+                }
+              : null,
+          activePhaseSummary:
+            incoming.payload.outcome === "approved" && state.pendingAssistantState != null
+              ? "preparing"
+              : null,
           transportFlavor: "contract" as const,
           runStatus: currentRun?.status ?? state.runStatus,
         };
@@ -612,6 +847,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             runs: nextRuns,
           },
           runStatus: incoming.runId == null ? state.runStatus : "failed",
+          isSubmitting: false,
+          pendingAssistantState: null,
+          activePhaseSummary: null,
           statusMessage: incoming.payload.message,
           transportFlavor: "contract" as const,
         };

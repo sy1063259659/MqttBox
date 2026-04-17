@@ -242,7 +242,17 @@ describe("HttpServer", () => {
       method: "POST",
       body: {
         content: "hello harness",
-        attachments: [{ id: "image-1", kind: "image" }],
+        attachments: [
+          {
+            id: "image-1",
+            kind: "image",
+            source: "file",
+            mimeType: "image/png",
+            filename: "capture.png",
+            dataUrl: "data:image/png;base64,AAAA",
+            byteSize: 4,
+          },
+        ],
       },
     });
     const invalid = await requestJson(started.baseUrl, "/sessions/session-1/messages", {
@@ -260,10 +270,20 @@ describe("HttpServer", () => {
     expect(harness.appendSessionMessage).toHaveBeenCalledWith({
       sessionId: "session-1",
       message: "hello harness",
-      attachments: [{ id: "image-1", kind: "image" }],
+      attachments: [
+        {
+          id: "image-1",
+          kind: "image",
+          source: "file",
+          mimeType: "image/png",
+          filename: "capture.png",
+          dataUrl: "data:image/png;base64,AAAA",
+          byteSize: 4,
+        },
+      ],
     });
     expect(invalid.response.status).toBe(400);
-    expect(invalid.body).toEqual({ error: "content is required" });
+    expect(invalid.body).toEqual({ error: "content_required", message: "content is required" });
   });
 
   it("returns 500 for message endpoint failures", async () => {
@@ -348,7 +368,7 @@ describe("HttpServer", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>);
 
     expect(invalid.response.status).toBe(400);
-    expect(invalid.body).toEqual({ error: "content is required" });
+    expect(invalid.body).toEqual({ error: "content_required", message: "content is required" });
     expect(failedResponse.status).toBe(200);
     expect(chunks).toEqual([
       {
@@ -385,7 +405,7 @@ describe("HttpServer", () => {
       "approved",
     );
     expect(invalid.response.status).toBe(400);
-    expect(invalid.body).toEqual({ error: "outcome is required" });
+    expect(invalid.body).toEqual({ error: "outcome_required", message: "outcome is required" });
   });
 
   it("returns 500 when approval resolution fails", async () => {

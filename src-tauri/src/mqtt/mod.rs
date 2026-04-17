@@ -13,8 +13,8 @@ use rumqttc::{
         pki_types::{CertificateDer, PrivateKeyDer},
         ClientConfig, InconsistentKeys, RootCertStore,
     },
-    AsyncClient, ClientError, ConnectReturnCode, ConnectionError, Event, MqttOptions, Packet,
-    QoS, TlsConfiguration, Transport,
+    AsyncClient, ClientError, ConnectReturnCode, ConnectionError, Event, MqttOptions, Packet, QoS,
+    TlsConfiguration, Transport,
 };
 use tauri::{AppHandle, Emitter};
 use tokio::time::{sleep, timeout, Instant};
@@ -80,7 +80,10 @@ pub fn connect_runtime(
     let options = build_options_from_profile(&profile, secret.as_ref())?;
 
     let (client, mut eventloop) = AsyncClient::new(options, 100);
-    manager.lock().unwrap().register(connection_id.clone(), client.clone());
+    manager
+        .lock()
+        .unwrap()
+        .register(connection_id.clone(), client.clone());
 
     app.emit(
         "connection://status",
@@ -131,9 +134,8 @@ pub fn connect_runtime(
 
                     if let Ok(storage) = storage.lock() {
                         let _ = storage.insert_message(&message);
-                        let decorated = storage
-                            .decorate_message(message.clone())
-                            .unwrap_or(message);
+                        let decorated =
+                            storage.decorate_message(message.clone()).unwrap_or(message);
                         let _ = app.emit("message://received", &decorated);
                     } else {
                         let _ = app.emit("message://received", &message);
@@ -206,9 +208,7 @@ pub async fn test_connection(
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => return Ok(()),
                     Ok(_) => continue,
-                    Err(error) => {
-                        return Err(AppError::Message(describe_connection_error(&error)))
-                    }
+                    Err(error) => return Err(AppError::Message(describe_connection_error(&error))),
                 }
             }
         },
@@ -297,14 +297,20 @@ fn build_options_from_profile(
     profile: &ConnectionProfileDto,
     secret: Option<&ConnectionSecretDto>,
 ) -> AppResult<MqttOptions> {
-    let mut options =
-        MqttOptions::new(profile.client_id.clone(), profile.host.clone(), profile.port as u16);
+    let mut options = MqttOptions::new(
+        profile.client_id.clone(),
+        profile.host.clone(),
+        profile.port as u16,
+    );
     options.set_keep_alive(Duration::from_secs(profile.keep_alive_secs as u64));
     options.set_clean_session(profile.clean_session);
 
     if let Some(secret) = secret {
         if let Some(username) = secret.username.as_ref() {
-            options.set_credentials(username.clone(), secret.password.clone().unwrap_or_default());
+            options.set_credentials(
+                username.clone(),
+                secret.password.clone().unwrap_or_default(),
+            );
         }
     }
 
@@ -322,13 +328,19 @@ fn build_options_from_profile(
 }
 
 fn build_options_from_input(profile: &ConnectionProfileInput) -> AppResult<MqttOptions> {
-    let mut options =
-        MqttOptions::new(profile.client_id.clone(), profile.host.clone(), profile.port as u16);
+    let mut options = MqttOptions::new(
+        profile.client_id.clone(),
+        profile.host.clone(),
+        profile.port as u16,
+    );
     options.set_keep_alive(Duration::from_secs(profile.keep_alive_secs as u64));
     options.set_clean_session(profile.clean_session);
 
     if let Some(username) = profile.username.as_ref() {
-        options.set_credentials(username.clone(), profile.password.clone().unwrap_or_default());
+        options.set_credentials(
+            username.clone(),
+            profile.password.clone().unwrap_or_default(),
+        );
     }
 
     if profile.use_tls {
@@ -359,9 +371,9 @@ fn build_transport(
                 .with_root_certificates(build_root_cert_store(&ca)?)
                 .with_no_client_auth();
 
-            Ok(Transport::tls_with_config(TlsConfiguration::Rustls(Arc::new(
-                config,
-            ))))
+            Ok(Transport::tls_with_config(TlsConfiguration::Rustls(
+                Arc::new(config),
+            )))
         }
         "mutual" => {
             let ca = read_tls_file(ca_cert_path, "CA 证书")?;
@@ -369,19 +381,16 @@ fn build_transport(
             let key = read_tls_file(client_key_path, "客户端私钥")?;
             let certificates = parse_certificate_chain(&cert, "客户端证书")?;
             let private_key = parse_private_key(&key, passphrase, "客户端私钥")?;
-            let private_key = parse_rustls_private_key(
-                &private_key,
-                "客户端私钥",
-            )?;
+            let private_key = parse_rustls_private_key(&private_key, "客户端私钥")?;
 
             let config = ClientConfig::builder()
                 .with_root_certificates(build_root_cert_store(&ca)?)
                 .with_client_auth_cert(certificates, private_key)
                 .map_err(map_client_auth_error)?;
 
-            Ok(Transport::tls_with_config(TlsConfiguration::Rustls(Arc::new(
-                config,
-            ))))
+            Ok(Transport::tls_with_config(TlsConfiguration::Rustls(
+                Arc::new(config),
+            )))
         }
         _ => Err(AppError::Message("TLS 模式无效，请检查连接配置".into())),
     }
@@ -393,9 +402,8 @@ fn read_tls_file(path: Option<&str>, label: &str) -> AppResult<Vec<u8>> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::Message(format!("{label} 路径不能为空")))?;
 
-    let bytes = fs::read(path).map_err(|error| {
-        AppError::Message(format!("{label} 读取失败：{path} ({error})"))
-    })?;
+    let bytes = fs::read(path)
+        .map_err(|error| AppError::Message(format!("{label} 读取失败：{path} ({error})")))?;
 
     if bytes.is_empty() {
         return Err(AppError::Message(format!("{label} 文件为空：{path}")));
@@ -437,14 +445,11 @@ fn parse_private_key(
     passphrase: Option<&str>,
     label: &str,
 ) -> AppResult<PrivateKeyDer<'static>> {
-    let trimmed_passphrase = passphrase
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let trimmed_passphrase = passphrase.map(str::trim).filter(|value| !value.is_empty());
 
     if is_encrypted_private_key(bytes) {
-        let passphrase = trimmed_passphrase.ok_or_else(|| {
-            AppError::Message(format!("{label} 需要 passphrase 才能解密"))
-        })?;
+        let passphrase = trimmed_passphrase
+            .ok_or_else(|| AppError::Message(format!("{label} 需要 passphrase 才能解密")))?;
 
         return decrypt_private_key(bytes, passphrase, label);
     }
@@ -478,11 +483,7 @@ fn parse_plain_private_key(bytes: &[u8], label: &str) -> AppResult<PrivateKeyDer
 
     PrivateKeyDer::try_from(bytes)
         .map(|key| key.clone_key())
-        .map_err(|_| {
-            AppError::Message(format!(
-                "{label} 格式无效，请使用 PEM/DER 私钥文件"
-            ))
-        })
+        .map_err(|_| AppError::Message(format!("{label} 格式无效，请使用 PEM/DER 私钥文件")))
 }
 
 fn decrypt_private_key(
@@ -495,9 +496,8 @@ fn decrypt_private_key(
             AppError::Message(format!("{label} 格式无效，请使用 PEM 或 DER 私钥文件"))
         })?;
 
-        let (pem_label, doc) = SecretDocument::from_pem(pem).map_err(|error| {
-            AppError::Message(format!("{label} 解析失败：{error}"))
-        })?;
+        let (pem_label, doc) = SecretDocument::from_pem(pem)
+            .map_err(|error| AppError::Message(format!("{label} 解析失败：{error}")))?;
 
         if pem_label != "ENCRYPTED PRIVATE KEY" {
             return Err(AppError::Message(format!(
@@ -530,11 +530,7 @@ fn decrypt_private_key(
 
     PrivateKeyDer::try_from(decrypted.as_bytes())
         .map(|key| key.clone_key())
-        .map_err(|_| {
-            AppError::Message(format!(
-                "{label} 解密成功，但私钥内容无效或格式不受支持"
-            ))
-        })
+        .map_err(|_| AppError::Message(format!("{label} 解密成功，但私钥内容无效或格式不受支持")))
 }
 
 fn looks_like_pem(bytes: &[u8]) -> bool {
@@ -593,9 +589,7 @@ fn describe_connection_error(error: &ConnectionError) -> String {
             }
             ConnectReturnCode::BadClientId => "Broker 拒绝连接：Client ID 无效".into(),
             ConnectReturnCode::ServiceUnavailable => "Broker 不可用，请稍后重试".into(),
-            ConnectReturnCode::BadUserNamePassword => {
-                "Broker 拒绝连接：用户名或密码错误".into()
-            }
+            ConnectReturnCode::BadUserNamePassword => "Broker 拒绝连接：用户名或密码错误".into(),
             ConnectReturnCode::NotAuthorized => "Broker 拒绝连接：当前账号没有权限".into(),
         },
         ConnectionError::MqttState(state_error) => {
@@ -689,7 +683,10 @@ mod tests {
     fn detects_json_payloads() {
         assert_eq!(build_payload_fields(br#"{"ok":true}"#).payload_type, "json");
         assert_eq!(build_payload_fields(b"plain text").payload_type, "text");
-        assert_eq!(build_payload_fields(&[0xff, 0xfe, 0xfd]).payload_type, "binary");
+        assert_eq!(
+            build_payload_fields(&[0xff, 0xfe, 0xfd]).payload_type,
+            "binary"
+        );
     }
 
     #[test]

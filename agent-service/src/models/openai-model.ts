@@ -5,6 +5,7 @@ import {
   ModelRequest,
   ModelResponse,
   ModelRuntimeConfig,
+  ModelRuntimeSnapshot,
 } from "./types.js";
 
 export interface OpenAIModelClientOptions {
@@ -71,7 +72,20 @@ export class OpenAIModelClient implements ModelClient {
           if (!fallback) {
             throw new ModelClientError("empty_response", "OpenAI returned an empty response");
           }
+          if (isLikelyHtmlGatewayError(fallback)) {
+            throw new ModelClientError(
+              "openai_request_failed",
+              "The configured OpenAI-compatible API returned an HTML gateway error page. Check the API base URL or upstream gateway status.",
+            );
+          }
           return { content: fallback };
+        }
+
+        if (isLikelyHtmlGatewayError(content)) {
+          throw new ModelClientError(
+            "openai_request_failed",
+            "The configured OpenAI-compatible API returned an HTML gateway error page. Check the API base URL or upstream gateway status.",
+          );
         }
 
         return { content };
@@ -101,6 +115,12 @@ export class OpenAIModelClient implements ModelClient {
       const content = response.output_text?.trim();
       if (!content) {
         throw new ModelClientError("empty_response", "OpenAI returned an empty response");
+      }
+      if (isLikelyHtmlGatewayError(content)) {
+        throw new ModelClientError(
+          "openai_request_failed",
+          "The configured OpenAI-compatible API returned an HTML gateway error page. Check the API base URL or upstream gateway status.",
+        );
       }
 
       return { content };
@@ -139,6 +159,16 @@ export class OpenAIModelClient implements ModelClient {
     };
   }
 
+  getRuntimeConfig(): ModelRuntimeSnapshot {
+    return {
+      provider: this.provider,
+      enabled: this.enabled,
+      apiKey: this.apiKey,
+      baseUrl: this.baseUrl,
+      model: this.model,
+    };
+  }
+
   private get defaultBaseUrl() {
     return this.options.baseUrl?.trim() || "https://api.openai.com/v1";
   }
@@ -169,4 +199,14 @@ export class OpenAIModelClient implements ModelClient {
 
     return this.client;
   }
+}
+
+function isLikelyHtmlGatewayError(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    (normalized.startsWith("<!doctype html") || normalized.startsWith("<html")) &&
+    (normalized.includes("bad gateway") ||
+      normalized.includes("error code 502") ||
+      normalized.includes("cloudflare"))
+  );
 }

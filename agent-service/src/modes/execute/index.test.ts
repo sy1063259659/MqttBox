@@ -1,24 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModeHandlerDeps, ModeInput } from "../types.js";
+import { ToolRegistry } from "../../tools/registry.js";
 import { ExecuteModeHandler } from "./index.js";
 
 describe("ExecuteModeHandler", () => {
-  const generate = vi.fn();
+  const runExecute = vi.fn();
   const getSystemPrompt = vi.fn();
   const eventBus = { publish: vi.fn(), subscribe: vi.fn(), subscribeAll: vi.fn() };
   const toolRunner = { execute: vi.fn() };
+  const toolRegistry = new ToolRegistry();
   const deps = {
     modelClient: {
       provider: "mock",
-      generate,
+      generate: vi.fn(),
       configure: vi.fn(),
+      getRuntimeConfig: vi.fn(),
       getConfigSummary: vi.fn(),
     },
     promptRegistry: {
       getSystemPrompt,
     },
     eventBus,
+    toolRegistry,
     toolRunner,
+    deepAgentsAdapter: {
+      runtime: "deepagentsjs-test",
+      initialize: vi.fn(),
+      runChat: vi.fn(),
+      runExecute,
+    },
   } as unknown as ModeHandlerDeps;
 
   const input: ModeInput = {
@@ -31,6 +41,7 @@ describe("ExecuteModeHandler", () => {
     message: "generate parser steps",
     attachments: [],
     capabilityId: "parser-authoring",
+    runId: "run-2",
     eventBus: eventBus as never,
     toolRunner: toolRunner as never,
     onDelta: vi.fn(),
@@ -39,29 +50,42 @@ describe("ExecuteModeHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getSystemPrompt.mockReturnValue("execute system prompt");
-    generate.mockResolvedValue({ content: "plan complete" });
+    runExecute.mockResolvedValue({
+      assistantText: "plan complete",
+      artifactCandidate: { name: "Parser", script: "function parse() { return {}; }" },
+    });
   });
 
-  it("injects the execute system prompt and returns model content", async () => {
+  it("injects the execute system prompt and returns runtime content", async () => {
     const handler = new ExecuteModeHandler(deps);
 
-    await expect(handler.respond(input)).resolves.toBe("plan complete");
+    await expect(handler.respond(input)).resolves.toEqual({
+      assistantText: "plan complete",
+      artifactCandidate: { name: "Parser", script: "function parse() { return {}; }" },
+    });
 
     expect(getSystemPrompt).toHaveBeenCalledWith("execute", "parser-authoring");
-    expect(generate).toHaveBeenCalledWith({
-      mode: "execute",
+    expect(runExecute).toHaveBeenCalledWith({
+      sessionId: input.session.id,
       systemPrompt: "execute system prompt",
       userMessage: input.message,
       attachments: input.attachments,
       onDelta: input.onDelta,
+      capabilityId: input.capabilityId,
+      runId: input.runId,
+      safetyLevel: input.session.safetyLevel,
+      eventBus,
+      toolRunner,
+      toolDefinitions: [],
+      modelClient: deps.modelClient,
     });
   });
 
   it("forwards streaming deltas during execution responses", async () => {
-    generate.mockImplementationOnce(async (request) => {
+    runExecute.mockImplementationOnce(async (request) => {
       request.onDelta?.("step-1");
       request.onDelta?.("step-2");
-      return { content: "artifact ready" };
+      return { assistantText: "artifact ready" };
     });
     const onDelta = vi.fn();
     const handler = new ExecuteModeHandler(deps);
@@ -80,9 +104,9 @@ describe("ExecuteModeHandler", () => {
     expect(getSystemPrompt).toHaveBeenCalledWith("execute", null);
   });
 
-  it("propagates model errors for execute mode", async () => {
+  it("propagates runtime errors for execute mode", async () => {
     const handler = new ExecuteModeHandler(deps);
-    generate.mockRejectedValueOnce(new Error("execution failed"));
+    runExecute.mockRejectedValueOnce(new Error("execution failed"));
 
     await expect(handler.respond(input)).rejects.toThrow("execution failed");
   });

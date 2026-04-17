@@ -8,6 +8,14 @@ export interface ModelRuntimeConfig {
   model?: string;
 }
 
+export interface ModelRuntimeSnapshot {
+  provider: string;
+  enabled: boolean;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
 export interface ModelRequest {
   mode: AgentSessionMode;
   systemPrompt: string;
@@ -36,6 +44,7 @@ export interface ModelClient {
   provider: string;
   generate(request: ModelRequest): Promise<ModelResponse>;
   configure(config: ModelRuntimeConfig): void;
+  getRuntimeConfig(): ModelRuntimeSnapshot;
   getConfigSummary(): {
     provider: string;
     configured: boolean;

@@ -7,10 +7,17 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { I18nProvider, useI18n } from "@/lib/i18n";
-import { getAgentServiceHealth, syncAgentServiceConfig } from "@/services/agent-service";
+import {
+  getAgentServiceHealth,
+  isAgentServiceUnreachableError,
+  syncAgentServiceConfig,
+} from "@/services/agent-service";
 import { closeCurrentWindow } from "@/services/window";
 import {
+  defaultAgentSettings,
   getAgentSettings,
+  hasValidAgentModelConfig,
+  normalizeAgentSettings,
   peekCachedAppSettings,
   peekCachedAgentSettings,
   saveAgentSettings,
@@ -35,15 +42,6 @@ interface SettingsViewProps {
   standalone?: boolean;
 }
 
-const defaultAgentSettings: AgentSettingsDto = {
-  enabled: false,
-  provider: "openai",
-  baseUrl: "https://api.openai.com/v1",
-  apiKey: "",
-  model: "gpt-5.4",
-  serviceUrl: "http://127.0.0.1:8787",
-};
-
 export function SettingsView({
   initialSettings,
   onClose,
@@ -53,7 +51,10 @@ export function SettingsView({
   const { t } = useI18n();
   const [settings, setSettings] = useState<AppSettingsDto>(initialSettings);
   const [agentSettings, setAgentSettings] = useState<AgentSettingsDto>(
-    () => peekCachedAgentSettings() ?? defaultAgentSettings,
+    () => normalizeAgentSettings(peekCachedAgentSettings() ?? defaultAgentSettings),
+  );
+  const [savedAgentSettings, setSavedAgentSettings] = useState<AgentSettingsDto>(
+    () => normalizeAgentSettings(peekCachedAgentSettings() ?? defaultAgentSettings),
   );
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingAgent, setIsCheckingAgent] = useState(false);
@@ -66,10 +67,14 @@ export function SettingsView({
   useEffect(() => {
     void getAgentSettings()
       .then((next) => {
-        setAgentSettings(next);
+        const normalized = normalizeAgentSettings(next);
+        setAgentSettings(normalized);
+        setSavedAgentSettings(normalized);
       })
       .catch(() => {
-        setAgentSettings(peekCachedAgentSettings() ?? defaultAgentSettings);
+        const normalized = normalizeAgentSettings(peekCachedAgentSettings() ?? defaultAgentSettings);
+        setAgentSettings(normalized);
+        setSavedAgentSettings(normalized);
       });
   }, []);
 
@@ -85,12 +90,34 @@ export function SettingsView({
   const saveSettings = async () => {
     setIsSaving(true);
     try {
+      const shouldAutoEnableOnFirstValidSave =
+        !hasValidAgentModelConfig(savedAgentSettings) &&
+        hasValidAgentModelConfig(agentSettings) &&
+        !agentSettings.enabled;
+      const nextAgentSettings = normalizeAgentSettings({
+        ...agentSettings,
+        enabled: shouldAutoEnableOnFirstValidSave ? true : agentSettings.enabled,
+      });
+
       await saveAppSettings(settings);
-      await saveAgentSettings(agentSettings);
-      await syncAgentServiceConfig(agentSettings);
+      await saveAgentSettings(nextAgentSettings);
+      let localOnlyMessage: string | null = null;
+
+      try {
+        await syncAgentServiceConfig(nextAgentSettings);
+        setAgentHealth(null);
+      } catch (error) {
+        if (!isAgentServiceUnreachableError(error)) {
+          throw error;
+        }
+        localOnlyMessage = t("settings.agentStatus.localServiceRequired");
+        setAgentHealth(localOnlyMessage);
+      }
+      setAgentSettings(nextAgentSettings);
+      setSavedAgentSettings(nextAgentSettings);
       document.documentElement.dataset.theme = settings.theme;
       await onSaved?.(settings);
-      toast.success(t("toast.settingsSaved"));
+      toast.success(localOnlyMessage ? t("toast.settingsSavedLocalOnly") : t("toast.settingsSaved"));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t("toast.settingsSaveFailed"));
     } finally {
@@ -101,7 +128,7 @@ export function SettingsView({
   const checkAgentHealth = async () => {
     setIsCheckingAgent(true);
     try {
-      const health = await getAgentServiceHealth(agentSettings.serviceUrl);
+      const health = await getAgentServiceHealth();
       const modelState = !health.model?.enabled
         ? t("settings.agentStatus.disabled")
         : !health.model.configured
@@ -111,8 +138,11 @@ export function SettingsView({
       setAgentHealth(status);
       toast.success(t("toast.agentHealthChecked"));
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : t("settings.agentStatus.unreachable");
+      const message = isAgentServiceUnreachableError(error)
+        ? t("settings.agentStatus.localServiceRequired")
+        : error instanceof Error
+          ? error.message
+          : t("settings.agentStatus.unreachable");
       setAgentHealth(message);
       toast.error(message);
     } finally {
@@ -131,12 +161,13 @@ export function SettingsView({
             <Label>{t("settings.theme")}</Label>
             <Select
               value={settings.theme}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextTheme = event.currentTarget.value as AppSettingsDto["theme"];
                 setSettings((current) => ({
                   ...current,
-                  theme: event.currentTarget.value as AppSettingsDto["theme"],
-                }))
-              }
+                  theme: nextTheme,
+                }));
+              }}
             >
               <option value="graphite">{t("theme.graphite")}</option>
               <option value="midnight">{t("theme.midnight")}</option>
@@ -146,12 +177,13 @@ export function SettingsView({
             <Label>{t("settings.timestamp")}</Label>
             <Select
               value={settings.timestampFormat}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextTimestampFormat = event.currentTarget.value;
                 setSettings((current) => ({
                   ...current,
-                  timestampFormat: event.currentTarget.value,
-                }))
-              }
+                  timestampFormat: nextTimestampFormat,
+                }));
+              }}
             >
               <option value="datetime">{t("timestamp.datetime")}</option>
               <option value="time">{t("timestamp.time")}</option>
@@ -161,12 +193,13 @@ export function SettingsView({
             <Label>{t("settings.language")}</Label>
             <Select
               value={settings.locale}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextLocale = event.currentTarget.value as AppSettingsDto["locale"];
                 setSettings((current) => ({
                   ...current,
-                  locale: event.currentTarget.value as AppSettingsDto["locale"],
-                }))
-              }
+                  locale: nextLocale,
+                }));
+              }}
             >
               <option value="system">{t("locale.system")}</option>
               <option value="zh-CN">{t("locale.zh-CN")}</option>
@@ -186,12 +219,13 @@ export function SettingsView({
             <Input
               type="number"
               value={settings.messageHistoryLimitPerConnection}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextLimit = Number(event.currentTarget.value) || 0;
                 setSettings((current) => ({
                   ...current,
-                  messageHistoryLimitPerConnection: Number(event.currentTarget.value) || 0,
-                }))
-              }
+                  messageHistoryLimitPerConnection: nextLimit,
+                }));
+              }}
             />
           </div>
           <div className="settings-toggle">
@@ -199,12 +233,13 @@ export function SettingsView({
             <input
               id="auto-scroll"
               checked={settings.autoScrollMessages}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextAutoScroll = event.currentTarget.checked;
                 setSettings((current) => ({
                   ...current,
-                  autoScrollMessages: event.currentTarget.checked,
-                }))
-              }
+                  autoScrollMessages: nextAutoScroll,
+                }));
+              }}
               type="checkbox"
             />
           </div>
@@ -221,12 +256,13 @@ export function SettingsView({
             <input
               id="agent-enabled"
               checked={agentSettings.enabled}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextEnabled = event.currentTarget.checked;
                 setAgentSettings((current) => ({
                   ...current,
-                  enabled: event.currentTarget.checked,
-                }))
-              }
+                  enabled: nextEnabled,
+                }));
+              }}
               type="checkbox"
             />
           </div>
@@ -234,50 +270,41 @@ export function SettingsView({
             <Label>{t("settings.agentProvider")}</Label>
             <Select
               value={agentSettings.provider}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextProvider = event.currentTarget.value as AgentSettingsDto["provider"];
                 setAgentSettings((current) => ({
                   ...current,
-                  provider: event.currentTarget.value as AgentSettingsDto["provider"],
-                }))
-              }
+                  provider: nextProvider,
+                }));
+              }}
             >
               <option value="openai">OpenAI</option>
             </Select>
           </div>
           <div>
-            <Label>{t("settings.agentServiceUrl")}</Label>
-            <Input
-              value={agentSettings.serviceUrl}
-              onChange={(event) =>
-                setAgentSettings((current) => ({
-                  ...current,
-                  serviceUrl: event.currentTarget.value,
-                }))
-              }
-            />
-          </div>
-          <div>
             <Label>{t("settings.agentBaseUrl")}</Label>
             <Input
               value={agentSettings.baseUrl}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextBaseUrl = event.currentTarget.value;
                 setAgentSettings((current) => ({
                   ...current,
-                  baseUrl: event.currentTarget.value,
-                }))
-              }
+                  baseUrl: nextBaseUrl,
+                }));
+              }}
             />
           </div>
           <div>
             <Label>{t("settings.agentModel")}</Label>
             <Input
               value={agentSettings.model}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextModel = event.currentTarget.value;
                 setAgentSettings((current) => ({
                   ...current,
-                  model: event.currentTarget.value,
-                }))
-              }
+                  model: nextModel,
+                }));
+              }}
             />
           </div>
           <div>
@@ -285,12 +312,13 @@ export function SettingsView({
             <Input
               type="password"
               value={agentSettings.apiKey}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextApiKey = event.currentTarget.value;
                 setAgentSettings((current) => ({
                   ...current,
-                  apiKey: event.currentTarget.value,
-                }))
-              }
+                  apiKey: nextApiKey,
+                }));
+              }}
             />
           </div>
         </div>

@@ -13,7 +13,7 @@ import { PolicyEngine } from "./policy/index.js";
 import { PromptRegistry } from "./prompts/index.js";
 import { InMemoryTransport } from "./transport/inmemory-transport.js";
 import { WsTransport } from "./transport/ws-transport.js";
-import { ToolRegistry, ToolRunner } from "./tools/index.js";
+import { registerBuiltinTools, ToolRegistry, ToolRunner } from "./tools/index.js";
 import { TypedEventBus } from "./harness/event-bus.js";
 
 async function main(): Promise<void> {
@@ -32,7 +32,16 @@ async function main(): Promise<void> {
   const wsTransport = new WsTransport(logger, {
     port: Number(process.env.AGENT_WS_PORT ?? 8788),
   });
+  const capabilityRegistry = new CapabilityRegistry();
+  const memoryStore = new MemoryStore();
+  const artifactStore = new ArtifactStore();
   const toolRegistry = new ToolRegistry();
+  registerBuiltinTools({
+    toolRegistry,
+    capabilityRegistry,
+    memoryStore,
+    artifactStore,
+  });
   const toolRunner = new ToolRunner(toolRegistry);
   const harness = new AgentHarness({
     logger,
@@ -46,9 +55,9 @@ async function main(): Promise<void> {
       executor: async () => {},
     }),
     budgetManager: new BudgetManager(),
-    capabilityRegistry: new CapabilityRegistry(),
-    memoryStore: new MemoryStore(),
-    artifactStore: new ArtifactStore(),
+    capabilityRegistry,
+    memoryStore,
+    artifactStore,
     deepAgentsAdapter: new DeepAgentsAdapter(logger),
     modelClient,
     toolRegistry,

@@ -7,20 +7,21 @@ import type {
   ToolChoice,
 } from "@langchain/core/language_models/chat_models";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { AIMessage, type BaseMessage } from "@langchain/core/messages";
-import type { ChatGenerationChunk, ChatResult } from "@langchain/core/outputs";
+import { AIMessage, AIMessageChunk, type BaseMessage } from "@langchain/core/messages";
+import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs";
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling";
 import {
   convertMessagesToResponsesInput,
   convertResponsesDeltaToChatGenerationChunk,
 } from "@langchain/openai";
-import { ModelClientError } from "./types.js";
+import { ModelClientError, type ModelProtocol } from "./types.js";
 
 export interface OpenAIDeepAgentsChatModelFields extends BaseChatModelParams {
   apiKey: string;
   baseUrl?: string;
   model: string;
   temperature?: number;
+  protocol?: ModelProtocol;
 }
 
 export interface OpenAIDeepAgentsChatCallOptions extends BaseChatModelCallOptions {
@@ -34,6 +35,7 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
   private readonly baseUrl?: string;
   private readonly model: string;
   private readonly temperature: number;
+  private readonly protocol: ModelProtocol;
   private readonly client: OpenAI;
   private defaultOptions: Partial<OpenAIDeepAgentsChatCallOptions> = {};
 
@@ -43,6 +45,7 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
     this.baseUrl = fields.baseUrl?.trim() || undefined;
     this.model = fields.model;
     this.temperature = fields.temperature ?? 0;
+    this.protocol = fields.protocol ?? "responses";
     this.client = new OpenAI({
       apiKey: this.apiKey,
       ...(this.baseUrl ? { baseURL: this.baseUrl } : {}),
@@ -55,6 +58,7 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
       baseUrl: this.baseUrl,
       model: this.model,
       temperature: this.temperature,
+      protocol: this.protocol,
       disableStreaming: this.disableStreaming,
       outputVersion: this.outputVersion,
     });
@@ -71,6 +75,7 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
     return {
       model: this.model,
       temperature: this.temperature,
+      protocol: this.protocol,
       tool_choice: formatToolChoice(merged.tool_choice),
       tools: merged.tools,
       parallel_tool_calls: merged.parallel_tool_calls,
@@ -88,7 +93,9 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
   }
 
   _llmType() {
-    return "openai_sdk_responses";
+    return this.protocol === "chat_completions"
+      ? "openai_sdk_chat_completions"
+      : "openai_sdk_responses";
   }
 
   async _generate(
@@ -98,8 +105,10 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
     const merged = this.mergeCallOptions(options);
 
     try {
-      const response = await this.client.responses.create(this.buildRequest(messages, merged));
-      const aiMessage = toAiMessage(response);
+      const aiMessage =
+        this.protocol === "chat_completions"
+          ? await this.generateChatCompletionMessage(messages, merged)
+          : await this.generateResponsesMessage(messages, merged);
       const text = extractMessageText(aiMessage);
       if (isLikelyHtmlGatewayError(text)) {
         throw createHtmlGatewayError();
@@ -113,17 +122,17 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
             generationInfo: aiMessage.response_metadata,
           },
         ],
-        ...(response.usage
+        ...((aiMessage.usage_metadata
           ? {
               llmOutput: {
                 tokenUsage: {
-                  promptTokens: response.usage.input_tokens ?? 0,
-                  completionTokens: response.usage.output_tokens ?? 0,
-                  totalTokens: response.usage.total_tokens ?? 0,
+                  promptTokens: aiMessage.usage_metadata.input_tokens ?? 0,
+                  completionTokens: aiMessage.usage_metadata.output_tokens ?? 0,
+                  totalTokens: aiMessage.usage_metadata.total_tokens ?? 0,
                 },
               },
             }
-          : {}),
+          : {}) as Record<string, unknown>),
       };
     } catch (error) {
       throw toModelClientError(error);
@@ -138,7 +147,16 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
     const merged = this.mergeCallOptions(options);
 
     try {
-      const stream = this.client.responses.stream(this.buildStreamingRequest(messages, merged));
+      if (this.protocol === "chat_completions") {
+        for await (const chunk of this.streamChatCompletionChunks(messages, merged, runManager)) {
+          yield chunk;
+        }
+        return;
+      }
+
+      const stream = this.client.responses.stream(
+        this.buildResponsesStreamingRequest(messages, merged),
+      );
       for await (const event of stream) {
         const chunk = convertResponsesDeltaToChatGenerationChunk(event);
         if (!chunk) {
@@ -171,7 +189,10 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
     };
   }
 
-  private buildRequest(messages: BaseMessage[], options: Partial<OpenAIDeepAgentsChatCallOptions>) {
+  private buildResponsesRequest(
+    messages: BaseMessage[],
+    options: Partial<OpenAIDeepAgentsChatCallOptions>,
+  ) {
     const request: OpenAI.Responses.ResponseCreateParamsNonStreaming = {
       model: this.model,
       temperature: this.temperature,
@@ -199,14 +220,86 @@ export class OpenAIDeepAgentsChatModel extends BaseChatModel<OpenAIDeepAgentsCha
     return request;
   }
 
-  private buildStreamingRequest(
+  private buildResponsesStreamingRequest(
     messages: BaseMessage[],
     options: Partial<OpenAIDeepAgentsChatCallOptions>,
   ) {
     return {
-      ...this.buildRequest(messages, options),
+      ...this.buildResponsesRequest(messages, options),
       stream: true as const,
     };
+  }
+
+  private buildChatCompletionsRequest(
+    messages: BaseMessage[],
+    options: Partial<OpenAIDeepAgentsChatCallOptions>,
+  ): OpenAI.Chat.ChatCompletionCreateParamsNonStreaming {
+    const request: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
+      model: this.model,
+      temperature: this.temperature,
+      messages: messages.map((message) => toChatCompletionMessage(message)),
+    };
+
+    const tools = Array.isArray(options.tools) ? options.tools.filter(isChatCompletionTool) : [];
+    if (tools.length > 0) {
+      request.tools = tools;
+    }
+
+    const toolChoice = formatChatCompletionToolChoice(options.tool_choice);
+    if (toolChoice !== undefined) {
+      request.tool_choice = toolChoice;
+    }
+
+    if (typeof options.parallel_tool_calls === "boolean") {
+      request.parallel_tool_calls = options.parallel_tool_calls;
+    }
+
+    return request;
+  }
+
+  private async generateResponsesMessage(
+    messages: BaseMessage[],
+    options: Partial<OpenAIDeepAgentsChatCallOptions>,
+  ) {
+    const response = await this.client.responses.create(this.buildResponsesRequest(messages, options));
+    return toResponsesAiMessage(response);
+  }
+
+  private async generateChatCompletionMessage(
+    messages: BaseMessage[],
+    options: Partial<OpenAIDeepAgentsChatCallOptions>,
+  ) {
+    const response = await this.client.chat.completions.create(
+      this.buildChatCompletionsRequest(messages, options),
+    );
+    return toChatCompletionAiMessage(response);
+  }
+
+  private async *streamChatCompletionChunks(
+    messages: BaseMessage[],
+    options: Partial<OpenAIDeepAgentsChatCallOptions>,
+    runManager?: CallbackManagerForLLMRun,
+  ): AsyncGenerator<ChatGenerationChunk> {
+    const stream = await this.client.chat.completions.create({
+      ...this.buildChatCompletionsRequest(messages, options),
+      stream: true,
+    });
+
+    for await (const event of stream) {
+      const chunk = toChatGenerationChunk(event);
+      if (!chunk) {
+        continue;
+      }
+
+      if (chunk.text) {
+        await runManager?.handleLLMNewToken(chunk.text);
+        if (isLikelyHtmlGatewayError(chunk.text)) {
+          throw createHtmlGatewayError();
+        }
+      }
+
+      yield chunk;
+    }
   }
 }
 
@@ -222,7 +315,7 @@ function formatToolDefinition(tool: BindToolsInput) {
   return convertToOpenAITool(tool);
 }
 
-function toAiMessage(response: OpenAI.Responses.Response) {
+function toResponsesAiMessage(response: OpenAI.Responses.Response) {
   const toolCalls = response.output
     .filter((item): item is OpenAI.Responses.ResponseFunctionToolCall => item.type === "function_call")
     .map((item) => ({
@@ -245,6 +338,36 @@ function toAiMessage(response: OpenAI.Responses.Response) {
           usage_metadata: {
             input_tokens: response.usage.input_tokens ?? 0,
             output_tokens: response.usage.output_tokens ?? 0,
+            total_tokens: response.usage.total_tokens ?? 0,
+          },
+        }
+      : {}),
+  });
+}
+
+function toChatCompletionAiMessage(response: OpenAI.Chat.ChatCompletion) {
+  const message = response.choices[0]?.message;
+
+  return new AIMessage({
+    content: normalizeChatCompletionMessageContent(message?.content),
+    tool_calls: (message?.tool_calls ?? [])
+      .filter((toolCall) => toolCall.type === "function")
+      .map((toolCall) => ({
+        id: toolCall.id,
+        name: toolCall.function.name,
+        args: parseToolArgs(toolCall.function.arguments),
+        type: "tool_call" as const,
+      })),
+    response_metadata: {
+      id: response.id,
+      model: response.model,
+      finish_reason: response.choices[0]?.finish_reason ?? null,
+    },
+    ...(response.usage
+      ? {
+          usage_metadata: {
+            input_tokens: response.usage.prompt_tokens ?? 0,
+            output_tokens: response.usage.completion_tokens ?? 0,
             total_tokens: response.usage.total_tokens ?? 0,
           },
         }
@@ -300,6 +423,25 @@ function isOpenAICustomTool(tool: unknown): tool is Record<string, unknown> {
   );
 }
 
+function isChatCompletionTool(tool: unknown): tool is OpenAI.Chat.ChatCompletionTool {
+  return (
+    typeof tool === "object" &&
+    tool !== null &&
+    "type" in tool &&
+    tool.type === "function"
+  );
+}
+
+function formatChatCompletionToolChoice(
+  toolChoice: unknown,
+): OpenAI.Chat.ChatCompletionToolChoiceOption | undefined {
+  const formatted = formatToolChoice(toolChoice);
+  if (!formatted || formatted === "required" || formatted === "auto" || formatted === "none") {
+    return formatted as OpenAI.Chat.ChatCompletionToolChoiceOption | undefined;
+  }
+  return formatted as OpenAI.Chat.ChatCompletionToolChoiceOption;
+}
+
 function extractMessageText(message: { content: unknown }) {
   if (typeof message.content === "string") {
     return message.content;
@@ -323,6 +465,208 @@ function extractMessageText(message: { content: unknown }) {
       return "";
     })
     .join("");
+}
+
+function normalizeChatCompletionMessageContent(
+  content: string | Array<OpenAI.Chat.ChatCompletionContentPartText | OpenAI.Chat.ChatCompletionContentPartRefusal> | null | undefined,
+) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
+    .join("");
+}
+
+function toChatGenerationChunk(
+  event: OpenAI.Chat.ChatCompletionChunk,
+): ChatGenerationChunk | null {
+  const delta = event.choices[0]?.delta;
+  if (!delta) {
+    return null;
+  }
+
+  const text = delta.content ?? "";
+  const toolCallChunks = (delta.tool_calls ?? [])
+    .filter((toolCall) => toolCall.type === "function")
+    .map((toolCall) => ({
+      id: toolCall.id,
+      name: toolCall.function?.name,
+      args: toolCall.function?.arguments,
+      index: toolCall.index,
+      type: "tool_call_chunk" as const,
+    }));
+
+  if (!text && toolCallChunks.length === 0) {
+    return null;
+  }
+
+  return new ChatGenerationChunk({
+    text,
+    message: new AIMessageChunk({
+      content: text,
+      tool_call_chunks: toolCallChunks,
+    }),
+    generationInfo: {
+      finish_reason: event.choices[0]?.finish_reason ?? null,
+      model: event.model,
+      id: event.id,
+    },
+  });
+}
+
+function toChatCompletionMessage(
+  message: BaseMessage,
+): OpenAI.Chat.ChatCompletionMessageParam {
+  const type = message._getType();
+  const record = asRecord(message);
+
+  switch (type) {
+    case "system":
+      return {
+        role: "system",
+        content: normalizeChatCompletionTextContent(message.content),
+      };
+    case "human":
+      return {
+        role: "user",
+        content: normalizeChatCompletionInputContent(message.content, true),
+      };
+    case "tool":
+      return {
+        role: "tool",
+        content: normalizeChatCompletionTextContent(message.content),
+        tool_call_id:
+          typeof record?.tool_call_id === "string"
+            ? record.tool_call_id
+            : typeof record?.tool_callId === "string"
+              ? record.tool_callId
+              : "",
+      };
+    case "ai":
+      return {
+        role: "assistant",
+        content: normalizeAssistantContent(message.content),
+        ...(Array.isArray(record?.tool_calls)
+          ? {
+              tool_calls: record.tool_calls
+                .map(toChatCompletionToolCall)
+                .filter((toolCall): toolCall is OpenAI.Chat.ChatCompletionMessageToolCall => Boolean(toolCall)),
+            }
+          : {}),
+      };
+    default:
+      return {
+        role: "user",
+        content: normalizeChatCompletionTextContent(message.content),
+      };
+  }
+}
+
+function normalizeAssistantContent(content: unknown) {
+  const text = normalizeChatCompletionTextContent(content);
+  return text.length > 0 ? text : null;
+}
+
+function normalizeChatCompletionInputContent(content: unknown, allowImages: boolean) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  const parts = content
+    .map((block) => toChatCompletionContentPart(block, allowImages))
+    .filter((part): part is OpenAI.Chat.ChatCompletionContentPart => Boolean(part));
+
+  if (parts.length === 0) {
+    return "";
+  }
+
+  return parts;
+}
+
+function normalizeChatCompletionTextContent(content: unknown) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .map((block) => {
+      const record = asRecord(block);
+      return record?.type === "text" && typeof record.text === "string" ? record.text : "";
+    })
+    .join("");
+}
+
+function toChatCompletionContentPart(
+  block: unknown,
+  allowImages: boolean,
+): OpenAI.Chat.ChatCompletionContentPart | null {
+  const record = asRecord(block);
+  if (!record) {
+    return null;
+  }
+
+  if (record.type === "text" && typeof record.text === "string") {
+    return {
+      type: "text",
+      text: record.text,
+    };
+  }
+
+  if (
+    allowImages &&
+    record.type === "image_url" &&
+    typeof asRecord(record.image_url)?.url === "string"
+  ) {
+    const imageUrl = asRecord(record.image_url);
+    if (!imageUrl || typeof imageUrl.url !== "string") {
+      return null;
+    }
+
+    return {
+      type: "image_url",
+      image_url: {
+        url: imageUrl.url,
+      },
+    };
+  }
+
+  return null;
+}
+
+function toChatCompletionToolCall(
+  toolCall: unknown,
+): OpenAI.Chat.ChatCompletionMessageToolCall | null {
+  const record = asRecord(toolCall);
+  if (!record || typeof record.name !== "string") {
+    return null;
+  }
+
+  return {
+    id: typeof record.id === "string" ? record.id : `call_${Math.random().toString(36).slice(2, 10)}`,
+    type: "function",
+    function: {
+      name: record.name,
+      arguments: JSON.stringify(record.args ?? {}),
+    },
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 }
 
 function parseToolArgs(value: string) {

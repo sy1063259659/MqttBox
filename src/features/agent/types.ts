@@ -4,11 +4,15 @@ import type {
   AgentEvent,
   AgentEventEnvelope,
   AgentRunDto,
+  AgentSessionContextSummaryDto,
+  AgentSessionDetailDto,
   AgentServiceConfigDto,
   AgentSafetyLevel,
   AgentSessionDto,
+  AgentThreadMessageDto,
   AgentSessionMode,
   ApprovalRequestDto,
+  ApprovalResolutionRecordDto,
   CapabilityDescriptor,
   ExecutionPlanDto,
   ExecutionStepDto,
@@ -16,6 +20,10 @@ import type {
   ToolDescriptor,
 } from "@agent-contracts";
 
+/**
+ * Legacy compatibility alias for the Tauri bridge only.
+ * Live tool discovery should use the agent-service ToolDescriptor payload from `/health`.
+ */
 export type AgentToolDescriptor = ToolDescriptor;
 
 export interface AgentContextDto {
@@ -23,7 +31,11 @@ export interface AgentContextDto {
   selectedTopic?: string | null;
   recentMessages: number;
   connectionHealth: string;
-  availableTools: AgentToolDescriptor[];
+  /**
+   * Legacy compatibility field from the Tauri context bridge.
+   * Live tool discovery should come from agent-service health instead.
+   */
+  availableTools?: AgentToolDescriptor[];
 }
 
 export interface LegacyAgentStatusEvent {
@@ -42,28 +54,26 @@ export interface AgentTimelineState {
   latestPlan: ExecutionPlanDto | null;
 }
 
-export interface AgentThreadMessage {
-  id: string;
-  role: "system" | "user" | "assistant";
-  content: string;
-  mode: AgentSessionMode;
-  safetyLevel: AgentSafetyLevel;
-  createdAt: string;
-  attachments: AgentAttachmentDto[];
-  runId?: string | null;
+export interface AgentThreadMessage extends AgentThreadMessageDto {
   isStreaming?: boolean;
   isOptimistic?: boolean;
 }
 
-export interface ApprovalResolutionRecord {
-  requestId: string;
-  outcome: "approved" | "rejected" | "expired";
-  resolvedAt: string;
-  resolver?: string | null;
+export type ApprovalResolutionRecord = ApprovalResolutionRecordDto;
+
+export interface AgentSessionSummary extends AgentSessionDto {}
+
+export interface AgentSessionDetail
+  extends Omit<AgentSessionDetailDto, "messages" | "timeline"> {
+  messages: AgentThreadMessage[];
+  timeline: AgentTimelineState;
 }
 
 export interface AgentHarnessState {
   session: AgentSessionDto | null;
+  activeSessionId: string | null;
+  sessionSummaries: AgentSessionSummary[];
+  sessionDetailsById: Record<string, AgentSessionDetail>;
   mode: AgentSessionMode;
   safetyLevel: AgentSafetyLevel;
   timeline: AgentTimelineState;
@@ -72,6 +82,7 @@ export interface AgentHarnessState {
   approvals: ApprovalRequestDto[];
   approvalHistory: ApprovalResolutionRecord[];
   artifacts: AgentArtifactDto[];
+  contextSummary: AgentSessionContextSummaryDto | null;
   capabilities: CapabilityDescriptor[];
   serviceConfig: AgentServiceConfigDto | null;
   transportFlavor: "unknown" | "legacy" | "contract";

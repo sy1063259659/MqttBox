@@ -34,9 +34,12 @@ describe("ExecuteModeHandler", () => {
   const input: ModeInput = {
     session: {
       id: "session-2",
-      mode: "execute",
-      safetyLevel: "draft",
       createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+      title: "Parser run",
+      lastMessagePreview: null,
+      draftMode: "execute",
+      draftSafetyLevel: "draft",
     },
     message: "generate parser steps",
     attachments: [],
@@ -73,7 +76,7 @@ describe("ExecuteModeHandler", () => {
       onDelta: input.onDelta,
       capabilityId: input.capabilityId,
       runId: input.runId,
-      safetyLevel: input.session.safetyLevel,
+      safetyLevel: input.session.draftSafetyLevel,
       eventBus,
       toolRunner,
       toolDefinitions: [],

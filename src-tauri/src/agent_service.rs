@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::OpenOptions,
-    io,
+    io::{self, Read, Write},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -9,12 +9,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 
+use crate::desktop_bridge::DesktopBridgeConfig;
+use crate::models::AgentToolDescriptor;
+
+const DEFAULT_AGENT_SERVICE_HOST: &str = "127.0.0.1";
 const DEFAULT_AGENT_SERVICE_PORT: u16 = 8787;
 const DEFAULT_AGENT_WS_PORT: u16 = 8788;
 const AGENT_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(8);
 const AGENT_SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Deserialize)]
+struct AgentServiceHealthResponse {
+    tools: Vec<AgentToolDescriptor>,
+}
 
 pub struct ManagedAgentService {
     child: Option<Child>,
@@ -25,7 +35,11 @@ impl ManagedAgentService {
         Self { child: None }
     }
 
-    pub fn ensure_running(&mut self, app: &AppHandle) -> io::Result<()> {
+    pub fn ensure_running(
+        &mut self,
+        app: &AppHandle,
+        desktop_bridge: &DesktopBridgeConfig,
+    ) -> io::Result<()> {
         if is_agent_service_listening(DEFAULT_AGENT_SERVICE_PORT) {
             return Ok(());
         }
@@ -42,6 +56,8 @@ impl ManagedAgentService {
             .current_dir(&launch.working_dir)
             .env("AGENT_SERVICE_PORT", DEFAULT_AGENT_SERVICE_PORT.to_string())
             .env("AGENT_WS_PORT", DEFAULT_AGENT_WS_PORT.to_string())
+            .env("AGENT_DESKTOP_BRIDGE_URL", &desktop_bridge.base_url)
+            .env("AGENT_DESKTOP_BRIDGE_TOKEN", &desktop_bridge.token)
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr);
@@ -105,6 +121,19 @@ impl ManagedAgentService {
             "Timed out waiting for the local agent service to start.",
         ))
     }
+}
+
+pub fn list_live_agent_tools() -> io::Result<Vec<AgentToolDescriptor>> {
+    let mut stream = TcpStream::connect((DEFAULT_AGENT_SERVICE_HOST, DEFAULT_AGENT_SERVICE_PORT))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(
+        b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+    )?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    parse_live_agent_tools_response(&response)
 }
 
 struct LaunchSpec {
@@ -225,6 +254,64 @@ fn open_agent_service_logs(app: &AppHandle) -> io::Result<(Stdio, Stdio)> {
 fn is_agent_service_listening(port: u16) -> bool {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
+}
+
+fn parse_live_agent_tools_response(response: &[u8]) -> io::Result<Vec<AgentToolDescriptor>> {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent service returned an invalid HTTP response.",
+        ));
+    };
+
+    let header_bytes = &response[..header_end];
+    let body_bytes = &response[header_end + 4..];
+    let header_text = String::from_utf8_lossy(header_bytes);
+    let status_line = header_text.lines().next().unwrap_or_default();
+
+    if !status_line.contains(" 200 ") {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Agent service /health request failed: {status_line}"),
+        ));
+    }
+
+    let health: AgentServiceHealthResponse =
+        serde_json::from_slice(body_bytes).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse agent service /health response: {error}"),
+            )
+        })?;
+
+    Ok(health.tools)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_live_agent_tools_response;
+    use std::io;
+
+    #[test]
+    fn parses_live_tool_list_from_health_response() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"tools\":[{\"id\":\"list_saved_parsers\",\"name\":\"list_saved_parsers\",\"description\":\"List saved parsers\"}]}".to_vec();
+
+        let tools = parse_live_agent_tools_response(&response).expect("should parse health tools");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].id, "list_saved_parsers");
+    }
+
+    #[test]
+    fn rejects_non_success_health_response() {
+        let response =
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n\r\n{}"
+                .to_vec();
+
+        let error = parse_live_agent_tools_response(&response).expect_err("should reject non-200");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
 }
 
 #[cfg(target_os = "windows")]

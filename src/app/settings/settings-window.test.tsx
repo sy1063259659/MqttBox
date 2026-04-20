@@ -34,8 +34,10 @@ vi.mock("@/services/tauri", async () => {
     getAgentSettings: vi.fn(async () => ({
       enabled: true,
       provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
       apiKey: "",
       model: "gpt-5.4",
+      protocol: "responses",
     })),
     peekCachedAgentSettings: vi.fn(() => null),
     peekCachedAppSettings: vi.fn(() => null),
@@ -76,6 +78,7 @@ describe("SettingsView", () => {
       baseUrl: "https://api.openai.com/v1",
       apiKey: "",
       model: "gpt-5.4",
+      protocol: "responses",
     });
   });
 
@@ -217,6 +220,7 @@ describe("SettingsView", () => {
       baseUrl: "https://api.openai.com/v1",
       apiKey: "test-api-key",
       model: "gpt-5.4",
+      protocol: "responses",
     });
     expect(syncAgentServiceConfig).toHaveBeenCalledWith({
       enabled: true,
@@ -224,6 +228,7 @@ describe("SettingsView", () => {
       baseUrl: "https://api.openai.com/v1",
       apiKey: "test-api-key",
       model: "gpt-5.4",
+      protocol: "responses",
     });
   });
 
@@ -234,6 +239,7 @@ describe("SettingsView", () => {
       baseUrl: "https://api.example.com/v1",
       apiKey: "saved-api-key",
       model: "gpt-5.4",
+      protocol: "responses",
     });
 
     container = document.createElement("div");
@@ -269,6 +275,7 @@ describe("SettingsView", () => {
       baseUrl: "https://api.example.com/v1",
       apiKey: "saved-api-key",
       model: "gpt-5.4",
+      protocol: "responses",
     });
     expect(syncAgentServiceConfig).toHaveBeenCalledWith({
       enabled: false,
@@ -276,6 +283,7 @@ describe("SettingsView", () => {
       baseUrl: "https://api.example.com/v1",
       apiKey: "saved-api-key",
       model: "gpt-5.4",
+      protocol: "responses",
     });
   });
 });

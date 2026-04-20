@@ -1,6 +1,6 @@
 import type { Server as NodeServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentEvent, AgentSessionDto } from "@agent-contracts";
+import type { AgentEvent, AgentSessionDetailDto, AgentSessionDto } from "@agent-contracts";
 import type { AgentHarness } from "../harness/agent-harness.js";
 import { Logger } from "../observability/logger.js";
 import { HttpServer } from "./http-server.js";
@@ -9,8 +9,10 @@ type HarnessStub = {
   health: ReturnType<typeof vi.fn>;
   getConfig: ReturnType<typeof vi.fn>;
   updateModelConfig: ReturnType<typeof vi.fn>;
+  listSessions: ReturnType<typeof vi.fn>;
   createSession: ReturnType<typeof vi.fn>;
   getSession: ReturnType<typeof vi.fn>;
+  getSessionDetail: ReturnType<typeof vi.fn>;
   appendSessionMessage: ReturnType<typeof vi.fn>;
   resolveApproval: ReturnType<typeof vi.fn>;
 };
@@ -20,10 +22,29 @@ function createSession(
 ): AgentSessionDto {
   return {
     id: "session-1",
-    mode: "chat",
-    safetyLevel: "observe",
     createdAt: "2026-04-15T00:00:00.000Z",
+    updatedAt: "2026-04-15T00:00:00.000Z",
+    title: "Conversation",
+    lastMessagePreview: null,
+    draftMode: "chat",
+    draftSafetyLevel: "observe",
     ...overrides,
+  };
+}
+
+function createSessionDetail(overrides: Partial<AgentSessionDto> = {}): AgentSessionDetailDto {
+  return {
+    session: createSession(overrides),
+    timeline: {
+      activeRunId: null,
+      runs: [],
+      latestPlan: null,
+    },
+    messages: [],
+    approvals: [],
+    approvalHistory: [],
+    artifacts: [],
+    contextSummary: null,
   };
 }
 
@@ -69,24 +90,35 @@ function createHarnessStub(): HarnessStub {
       runtime: { deepagentsRuntime: "stub" },
     })),
     updateModelConfig: vi.fn(),
+    listSessions: vi.fn(() => ({
+      sessions: [session],
+    })),
     createSession: vi.fn(({ mode, safetyLevel }: { mode?: string; safetyLevel?: string }) => ({
       session: createSession({
         id: "created-session",
-        mode: (mode as AgentSessionDto["mode"] | undefined) ?? "chat",
-        safetyLevel: (safetyLevel as AgentSessionDto["safetyLevel"] | undefined) ?? "observe",
+        draftMode: (mode as AgentSessionDto["draftMode"] | undefined) ?? "chat",
+        draftSafetyLevel:
+          (safetyLevel as AgentSessionDto["draftSafetyLevel"] | undefined) ?? "observe",
       }),
       events: [createEvent("session.start", "created-session")],
     })),
     getSession: vi.fn((sessionId: string) => (sessionId === session.id ? session : null)),
+    getSessionDetail: vi.fn((sessionId: string) =>
+      sessionId === session.id ? { detail: createSessionDetail({ id: sessionId }) } : null,
+    ),
     appendSessionMessage: vi.fn(
       async ({
         sessionId,
         message,
+        mode,
+        safetyLevel,
         attachments,
         onEvent,
       }: {
         sessionId: string;
         message: string;
+        mode?: string;
+        safetyLevel?: string;
         attachments: unknown[];
         onEvent?: (event: AgentEvent) => void;
       }) => {
@@ -109,7 +141,7 @@ function createHarnessStub(): HarnessStub {
         requestId: string,
         outcome: "approved" | "rejected" | "expired",
       ) => ({
-        session: createSession({ id: sessionId, mode: "execute" }),
+        session: createSession({ id: sessionId, draftMode: "execute" }),
         runId: "run-1",
         requestId,
         outcome,
@@ -192,7 +224,9 @@ describe("HttpServer", () => {
 
   it("creates sessions and fetches an existing session", async () => {
     const harness = createHarnessStub();
-    harness.getSession.mockReturnValueOnce(createSession({ id: "created-session", mode: "execute" }));
+    harness.getSessionDetail.mockReturnValueOnce({
+      detail: createSessionDetail({ id: "created-session", draftMode: "execute" }),
+    });
     const started = await startServer(harness);
     activeServer = started.server;
 
@@ -209,8 +243,8 @@ describe("HttpServer", () => {
     expect(created.body).toMatchObject({
       session: {
         id: "created-session",
-        mode: "execute",
-        safetyLevel: "confirm",
+        draftMode: "execute",
+        draftSafetyLevel: "confirm",
       },
     });
     expect(harness.createSession).toHaveBeenCalledWith({
@@ -219,7 +253,7 @@ describe("HttpServer", () => {
     });
     expect(fetched.response.status).toBe(200);
     expect(fetched.body).toEqual({
-      session: createSession({ id: "created-session", mode: "execute" }),
+      detail: createSessionDetail({ id: "created-session", draftMode: "execute" }),
     });
   });
 
@@ -270,6 +304,8 @@ describe("HttpServer", () => {
     expect(harness.appendSessionMessage).toHaveBeenCalledWith({
       sessionId: "session-1",
       message: "hello harness",
+      mode: undefined,
+      safetyLevel: undefined,
       attachments: [
         {
           id: "image-1",
@@ -394,7 +430,7 @@ describe("HttpServer", () => {
 
     expect(resolved.response.status).toBe(200);
     expect(resolved.body).toMatchObject({
-      session: { id: "session-1", mode: "execute" },
+      session: { id: "session-1", draftMode: "execute" },
       runId: "run-1",
       requestId: "request-1",
       outcome: "approved",

@@ -1,4 +1,8 @@
-import type { ToolDescriptor } from "@agent-contracts";
+import type {
+  AgentSafetyLevel,
+  AgentSessionMode,
+  ToolDescriptor,
+} from "@agent-contracts";
 import type { TypedEventBus } from "../harness/event-bus.js";
 import type { ZodTypeAny } from "zod";
 
@@ -22,6 +26,14 @@ export interface ToolDefinition {
   runtimeSchema?: ZodTypeAny;
   handler: (input: unknown, context: ToolContext) => Promise<ToolResult>;
   timeoutMs?: number;
+  toolKind?: ToolDescriptor["toolKind"];
+  riskLevel?: ToolDescriptor["riskLevel"];
+  allowedModes?: AgentSessionMode[];
+  minSafetyLevel?: AgentSafetyLevel;
+  requiresApproval?: boolean;
+  outputSchema?: ToolDescriptor["outputSchema"];
+  retryPolicy?: ToolDescriptor["retryPolicy"];
+  idempotent?: boolean;
 }
 
 export function toToolDescriptor(tool: ToolDefinition): ToolDescriptor {
@@ -29,15 +41,15 @@ export function toToolDescriptor(tool: ToolDefinition): ToolDescriptor {
     id: tool.name,
     name: tool.name,
     description: tool.description,
-    toolKind: "context",
-    riskLevel: "low",
-    allowedModes: ["chat", "execute"],
-    minSafetyLevel: "observe",
-    requiresApproval: false,
+    toolKind: tool.toolKind ?? "context",
+    riskLevel: tool.riskLevel ?? "low",
+    allowedModes: tool.allowedModes ?? ["chat", "execute"],
+    minSafetyLevel: tool.minSafetyLevel ?? "observe",
+    requiresApproval: tool.requiresApproval ?? false,
     inputSchema: tool.inputSchema,
-    outputSchema: null,
+    outputSchema: tool.outputSchema ?? null,
     timeoutMs: tool.timeoutMs ?? null,
-    retryPolicy: null,
-    idempotent: true,
+    retryPolicy: tool.retryPolicy ?? null,
+    idempotent: tool.idempotent ?? true,
   };
 }

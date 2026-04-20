@@ -6,13 +6,14 @@ vi.mock("@/services/agent-service", () => ({
   createAgentSession: vi.fn(),
   getAgentServiceConfig: vi.fn(),
   getAgentServiceHealth: vi.fn(),
+  getAgentSessionDetail: vi.fn(),
+  listAgentSessions: vi.fn(),
   resolveAgentApproval: vi.fn(),
   streamAgentMessage: vi.fn(),
 }));
 
 vi.mock("@/services/tauri", () => ({
   getAgentContext: vi.fn(),
-  listAgentTools: vi.fn(),
 }));
 
 import type { AgentArtifactDto, AgentEvent } from "@agent-contracts";
@@ -75,6 +76,9 @@ describe("AgentPanel", () => {
     useUiStore.setState({ activeOverlay: null });
     useAgentStore.setState({
       session: null,
+      activeSessionId: null,
+      sessionSummaries: [],
+      sessionDetailsById: {},
       mode: "execute",
       safetyLevel: "confirm",
       timeline: {
@@ -101,6 +105,7 @@ describe("AgentPanel", () => {
       approvals: [],
       approvalHistory: [],
       artifacts: [createArtifact()],
+      contextSummary: null,
       capabilities: [
         {
           id: "parser-authoring",
@@ -119,6 +124,7 @@ describe("AgentPanel", () => {
           model: "gpt-5.4",
           baseUrl: "http://localhost/mock",
           enabled: true,
+          protocol: "responses",
         },
         transport: {
           modes: ["in-memory", "ws"],
@@ -161,7 +167,6 @@ describe("AgentPanel", () => {
         selectedTopic: "factory/raw",
         recentMessages: 4,
         connectionHealth: "connected",
-        availableTools: [],
       },
     });
 
@@ -199,14 +204,21 @@ describe("AgentPanel", () => {
   it("renders the codex-style agent shell and opens parser drafts from the light result block", () => {
     ({ mounted: container, mountedRoot: root } = renderPanel());
 
-    expect(container?.textContent).toContain("Conversation");
-    expect(container?.textContent).toContain("Create parser for factory/raw");
-    expect(container?.textContent).toContain("Create parser for factory/raw");
+    const composerStatus = container?.querySelector(".agent-panel-composer-status");
+    const composer = container?.querySelector(".agent-panel-composer");
+
+    expect(container?.querySelector(".agent-panel-toolbar")).toBeNull();
+    expect(container?.querySelector(".agent-panel-composer-shell")).toBeNull();
+    expect(composer?.querySelector(".agent-panel-composer-textarea")).toBeTruthy();
+    expect(composer?.querySelector(".agent-panel-composer-bar")).toBeTruthy();
+    expect(composerStatus?.textContent).toContain("Preparing result");
     expect(container?.textContent).toContain("Execute");
     expect(container?.textContent).toContain("Confirm");
     expect(container?.textContent).toContain("Open in parser library");
     expect(container?.textContent).not.toContain("Details");
     expect(container?.textContent).not.toContain("Up to 4 images");
+    expect(container?.textContent).not.toContain("Draft generated from screenshots and text");
+    expect(container?.querySelector(".agent-panel-feed-item--followup .agent-panel-result-block")).toBeTruthy();
 
     const modeButton = Array.from(container?.querySelectorAll("button") ?? []).find(
       (button) => button.getAttribute("aria-label") === "Mode: execute",
@@ -232,6 +244,36 @@ describe("AgentPanel", () => {
         suggestedTestPayloadHex: "0102",
       }),
     );
+  });
+
+  it("keeps the empty state minimal without topic, health, or shortcut badges", () => {
+    useAgentStore.setState({
+      timeline: {
+        activeRunId: null,
+        latestPlan: null,
+        runs: [],
+      },
+      artifacts: [],
+      messages: [],
+      approvals: [],
+      runStatus: "idle",
+      statusMessage: null,
+      pendingAssistantState: null,
+    });
+
+    ({ mounted: container, mountedRoot: root } = renderPanel());
+
+    const textarea = container?.querySelector("textarea") as HTMLTextAreaElement | null;
+
+    expect(container?.querySelector(".agent-panel-toolbar")).toBeNull();
+    expect(container?.querySelector(".agent-panel-composer-status")?.textContent).toContain("Idle");
+    expect(container?.querySelector(".agent-panel-empty-state")).toBeTruthy();
+    expect(container?.textContent).not.toContain("Start with a parsing task");
+    expect(container?.textContent).not.toContain("Describe the payload layout");
+    expect(container?.textContent).not.toContain("factory/raw");
+    expect(container?.textContent).not.toContain("connected");
+    expect(container?.textContent).not.toContain("Paste");
+    expect(textarea?.getAttribute("placeholder")).toBe("Ask or describe a task");
   });
 
   it("renders approval requests inline and resolves them from the message flow", () => {
@@ -273,11 +315,145 @@ describe("AgentPanel", () => {
     expect(resolveApproval).toHaveBeenCalledWith("approval-1", "approved");
   });
 
+  it("normalizes assistant markdown-like text into short plain-text paragraphs", () => {
+    useAgentStore.setState({
+      timeline: {
+        activeRunId: null,
+        latestPlan: null,
+        runs: [],
+      },
+      artifacts: [],
+      approvals: [],
+      runStatus: "completed",
+      pendingAssistantState: null,
+      messages: [
+        {
+          id: "assistant-markdown-1",
+          role: "assistant",
+          content: "**Summary**\n- First point\n- Second point\n```js\nconst x = 1;\n```\nNext steps: keep testing.",
+          createdAt: "2026-04-15T00:00:00.000Z",
+          mode: "chat",
+          safetyLevel: "confirm",
+          attachments: [],
+          isStreaming: false,
+          isOptimistic: false,
+        },
+      ],
+    });
+
+    ({ mounted: container, mountedRoot: root } = renderPanel());
+
+    const assistantBody = container?.querySelector(".agent-panel-message-body");
+    const assistantParagraphs = Array.from(
+      container?.querySelectorAll(".agent-panel-message-paragraph") ?? [],
+    ).map((node) => node.textContent);
+
+    expect(assistantBody?.textContent).toContain("First point\nSecond point\nconst x = 1;\nkeep testing.");
+    expect(assistantBody?.textContent).not.toContain("First point Second point");
+    expect(assistantBody?.textContent).not.toContain("**Summary**");
+    expect(assistantBody?.textContent).not.toContain("- First point");
+    expect(assistantBody?.textContent).not.toContain("```");
+    expect(assistantBody?.textContent).not.toContain("Next steps:");
+    expect(assistantParagraphs).toEqual(["First point\nSecond point\nconst x = 1;\nkeep testing."]);
+  });
+
+  it("renders assistant replies as lightweight paragraphs with a stronger lead paragraph", () => {
+    useAgentStore.setState({
+      timeline: {
+        activeRunId: null,
+        latestPlan: null,
+        runs: [],
+      },
+      artifacts: [],
+      approvals: [],
+      runStatus: "completed",
+      pendingAssistantState: null,
+      messages: [
+        {
+          id: "assistant-paragraphs-1",
+          role: "assistant",
+          content: "Parser draft is ready.\n\nIt decodes battery voltage and status bits.\n\nPlease validate one live sample before saving.",
+          createdAt: "2026-04-15T00:00:00.000Z",
+          mode: "chat",
+          safetyLevel: "confirm",
+          attachments: [],
+          isStreaming: false,
+          isOptimistic: false,
+        },
+      ],
+    });
+
+    ({ mounted: container, mountedRoot: root } = renderPanel());
+
+    const paragraphs = Array.from(
+      container?.querySelectorAll(".agent-panel-message-paragraph") ?? [],
+    ) as HTMLParagraphElement[];
+
+    expect(paragraphs).toHaveLength(3);
+    expect(paragraphs[0]?.getAttribute("data-paragraph-index")).toBe("0");
+    expect(paragraphs[0]?.textContent).toBe("Parser draft is ready.");
+    expect(paragraphs[1]?.textContent).toBe("It decodes battery voltage and status bits.");
+    expect(paragraphs[2]?.textContent).toBe("Please validate one live sample before saving.");
+  });
+
+  it("renders parser save approvals with parser-specific actions", () => {
+    const resolveApproval = vi.fn(async () => {});
+    useAgentStore.setState({
+      approvals: [
+        {
+          id: "approval-save-1",
+          runId: "run-1",
+          stepId: null,
+          toolName: "save_parser_draft",
+          title: "Approve saving parser draft",
+          actionSummary: 'Save parser draft "Factory Parser" to Parser Library',
+          reason: "Parser draft save requests require explicit confirmation.",
+          riskLevel: "medium",
+          safetyLevel: "confirm",
+          inputPreview: JSON.stringify(
+            {
+              name: "Factory Parser",
+              suggestedTopicFilter: "factory/raw",
+              scriptPreview: "function parse(input) { return { ok: true }; }",
+            },
+            null,
+            2,
+          ),
+          requestedAt: "2026-04-15T00:00:02.000Z",
+          expiresAt: null,
+        },
+      ],
+      resolveApproval: resolveApproval as never,
+    } as never);
+
+    ({ mounted: container, mountedRoot: root } = renderPanel());
+
+    expect(container?.textContent).toContain("Save this parser to parser library?");
+    expect(container?.textContent).toContain("Factory Parser");
+    expect(container?.textContent).toContain("factory/raw");
+    expect(container?.textContent).toContain("Save parser");
+    expect(container?.textContent).toContain("Not now");
+    expect(container?.textContent).not.toContain('"name":"Factory Parser"');
+
+    const saveButton = Array.from(container?.querySelectorAll("button") ?? []).find((button) =>
+      button.textContent?.includes("Save parser"),
+    );
+    expect(saveButton).toBeTruthy();
+
+    act(() => {
+      saveButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(resolveApproval).toHaveBeenCalledWith("approval-save-1", "approved");
+  });
+
   it("adds pasted images from anywhere in the panel while preserving pasted text", async () => {
     ({ mounted: container, mountedRoot: root } = renderPanel());
 
     const panel = container?.querySelector(".agent-panel");
+    const composer = container?.querySelector(".agent-panel-composer");
     expect(panel).toBeTruthy();
+    expect(composer?.querySelector(".agent-panel-composer-preview-strip")).toBeNull();
 
     const file = new File(["binary"], "clipboard.png", { type: "image/png" });
     const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
@@ -305,6 +481,7 @@ describe("AgentPanel", () => {
     expect(useAgentStore.getState().draftPrompt).toBe("Create parser from screenshot + clipboard note");
     expect(useAgentStore.getState().draftAttachments).toHaveLength(1);
     expect(container?.textContent).toContain("clipboard.png");
+    expect(composer?.querySelector(".agent-panel-composer-preview-strip")).toBeTruthy();
   });
 
   it("clears the composer on send, shows phase summaries, and transitions to the streamed reply", async () => {
@@ -319,11 +496,17 @@ describe("AgentPanel", () => {
     useAgentStore.setState({
       session: {
         id: "session-1",
-        mode: "execute",
-        safetyLevel: "confirm",
         createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        title: "Create parser from screenshot",
+        lastMessagePreview: null,
+        draftMode: "execute",
+        draftSafetyLevel: "confirm",
         workspaceId: null,
       },
+      activeSessionId: "session-1",
+      sessionSummaries: [],
+      sessionDetailsById: {},
       timeline: {
         activeRunId: null,
         latestPlan: null,
@@ -367,7 +550,16 @@ describe("AgentPanel", () => {
     expect(container?.textContent).toContain("Create parser from screenshot");
     expect(container?.textContent).toContain("Sending");
     expect(container?.querySelector(".agent-panel-pending-block")).toBeTruthy();
+    expect(container?.querySelector(".agent-panel-composer-status")?.textContent).toContain("Sending");
     expect((sendButton as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      Array.from(container?.querySelectorAll(".agent-panel-feed-item") ?? []).map((item) =>
+        item.textContent?.replace(/\s+/g, " ").trim(),
+      ),
+    ).toEqual([
+      expect.stringContaining("Create parser from screenshot"),
+      expect.stringContaining("Sending"),
+    ]);
 
     expect(textarea?.disabled).toBe(false);
 
@@ -434,6 +626,14 @@ describe("AgentPanel", () => {
 
     expect(container?.textContent).toContain("Planning");
     expect(container?.textContent).toContain("Inspect payload bytes");
+    expect(
+      Array.from(container?.querySelectorAll(".agent-panel-feed-item") ?? []).map((item) =>
+        item.textContent?.replace(/\s+/g, " ").trim(),
+      ),
+    ).toEqual([
+      expect.stringContaining("Create parser from screenshot"),
+      expect.stringContaining("Planning"),
+    ]);
 
     await act(async () => {
       emitEvent?.({
@@ -492,6 +692,7 @@ describe("AgentPanel", () => {
 
     expect(container?.querySelector(".agent-panel-pending-block")).toBeNull();
     expect(container?.textContent).toContain("Here is the first draft parser");
+    expect(container?.querySelector(".agent-panel-composer-status")?.textContent).toContain("Completed");
     expect((sendButton as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -507,11 +708,17 @@ describe("AgentPanel", () => {
     useAgentStore.setState({
       session: {
         id: "session-1",
-        mode: "execute",
-        safetyLevel: "confirm",
         createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        title: "Create parser with enter",
+        lastMessagePreview: null,
+        draftMode: "execute",
+        draftSafetyLevel: "confirm",
         workspaceId: null,
       },
+      activeSessionId: "session-1",
+      sessionSummaries: [],
+      sessionDetailsById: {},
       timeline: {
         activeRunId: null,
         latestPlan: null,

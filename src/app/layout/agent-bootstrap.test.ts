@@ -12,6 +12,7 @@ const savedSettings: AgentSettingsDto = {
   baseUrl: "https://api.example.com/v1",
   apiKey: "sk-test",
   model: "gpt-5.4",
+  protocol: "responses",
 };
 
 describe("restoreAgentServiceRuntime", () => {

@@ -6,6 +6,7 @@ export interface ModelRuntimeConfig {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  protocol?: ModelProtocol;
 }
 
 export interface ModelRuntimeSnapshot {
@@ -14,7 +15,10 @@ export interface ModelRuntimeSnapshot {
   apiKey: string;
   baseUrl: string;
   model: string;
+  protocol: ModelProtocol;
 }
+
+export type ModelProtocol = "responses" | "chat_completions";
 
 export interface ModelRequest {
   mode: AgentSessionMode;
@@ -51,5 +55,6 @@ export interface ModelClient {
     model: string;
     baseUrl: string;
     enabled: boolean;
+    protocol: ModelProtocol;
   };
 }

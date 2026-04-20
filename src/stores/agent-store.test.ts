@@ -12,6 +12,9 @@ import { useAgentStore } from "@/stores/agent-store";
 function resetAgentStore() {
   useAgentStore.setState({
     session: null,
+    activeSessionId: null,
+    sessionSummaries: [],
+    sessionDetailsById: {},
     mode: "chat",
     safetyLevel: "confirm",
     timeline: {
@@ -24,6 +27,7 @@ function resetAgentStore() {
     approvals: [],
     approvalHistory: [],
     artifacts: [],
+    contextSummary: null,
     capabilities: [],
     serviceConfig: null,
     transportFlavor: "unknown",
@@ -132,9 +136,12 @@ describe("useAgentStore.applyIncomingEvent", () => {
         payload: {
           session: {
             id: "session-1",
-            mode: "execute",
-            safetyLevel: "confirm",
             createdAt: "2026-04-15T00:00:00.000Z",
+            updatedAt: "2026-04-15T00:00:00.000Z",
+            title: "Create parser draft",
+            lastMessagePreview: null,
+            draftMode: "execute",
+            draftSafetyLevel: "confirm",
             workspaceId: null,
           },
         },
@@ -393,5 +400,84 @@ describe("useAgentStore.applyIncomingEvent", () => {
       }),
     );
     expect(state.runStatus).toBe("idle");
+  });
+
+  it("keeps execute mode after event updates when the active session detail is not hydrated yet", () => {
+    useAgentStore.setState({
+      activeSessionId: "session-1",
+      session: {
+        id: "session-1",
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        title: "Conversation",
+        lastMessagePreview: null,
+        draftMode: "chat",
+        draftSafetyLevel: "confirm",
+        workspaceId: null,
+      },
+      sessionSummaries: [
+        {
+          id: "session-1",
+          createdAt: "2026-04-15T00:00:00.000Z",
+          updatedAt: "2026-04-15T00:00:00.000Z",
+          title: "Conversation",
+          lastMessagePreview: null,
+          draftMode: "chat",
+          draftSafetyLevel: "confirm",
+          workspaceId: null,
+        },
+      ],
+      sessionDetailsById: {},
+      mode: "chat",
+      safetyLevel: "confirm",
+    } as never);
+
+    useAgentStore.getState().setMode("execute");
+
+    applyEvents([
+      {
+        id: "evt-message",
+        type: "session.message",
+        timestamp: "2026-04-15T00:00:01.000Z",
+        sessionId: "session-1",
+        runId: null,
+        payload: {
+          messageId: "message-1",
+          role: "user",
+          content: "Save this parser",
+          mode: "execute",
+          safetyLevel: "confirm",
+          attachments: [],
+        },
+      },
+      {
+        id: "evt-run-started",
+        type: "run.started",
+        timestamp: "2026-04-15T00:00:02.000Z",
+        sessionId: "session-1",
+        runId: "run-1",
+        payload: {
+          run: createRun({ status: "running" }),
+        },
+      },
+      {
+        id: "evt-final",
+        type: "assistant.final",
+        timestamp: "2026-04-15T00:00:03.000Z",
+        sessionId: "session-1",
+        runId: "run-1",
+        payload: {
+          messageId: "assistant-1",
+          content: "Saved the parser draft after approval.",
+          finishReason: "stop",
+        },
+      },
+    ]);
+
+    const state = useAgentStore.getState();
+    expect(state.mode).toBe("execute");
+    expect(state.session?.draftMode).toBe("execute");
+    expect(state.sessionSummaries[0]?.draftMode).toBe("execute");
+    expect(state.sessionDetailsById["session-1"]?.session.draftMode).toBe("execute");
   });
 });

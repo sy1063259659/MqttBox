@@ -12,7 +12,7 @@ export interface DeepAgentToolBridgeInput {
 
 export function createDeepAgentTools(input: DeepAgentToolBridgeInput) {
   return input.toolDefinitions.flatMap((definition) => {
-    if (!definition.runtimeSchema) {
+    if (!definition.runtimeSchema || definition.requiresApproval) {
       return [];
     }
 

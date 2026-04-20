@@ -238,6 +238,7 @@ pub struct AgentSettingsDto {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub protocol: String,
 }
 
 impl Default for AgentSettingsDto {
@@ -248,12 +249,15 @@ impl Default for AgentSettingsDto {
             base_url: "https://api.openai.com/v1".into(),
             api_key: String::new(),
             model: "gpt-5.4".into(),
+            protocol: "responses".into(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Legacy-only tool descriptor kept for the Tauri compatibility bridge.
+/// The canonical runtime tool contract lives in agent-service `/health`.
 pub struct AgentToolDescriptor {
     pub id: String,
     pub name: String,
@@ -267,6 +271,9 @@ pub struct AgentContextDto {
     pub selected_topic: Option<String>,
     pub recent_messages: usize,
     pub connection_health: String,
+    /// Legacy-only compatibility field.
+    /// Live tool discovery should come from the local agent-service health endpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_tools: Vec<AgentToolDescriptor>,
 }
 

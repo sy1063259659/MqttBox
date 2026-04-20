@@ -1165,6 +1165,7 @@ impl StorageService {
                 "agentBaseUrl" => settings.base_url = serde_json::from_str(&row.1)?,
                 "agentApiKey" => settings.api_key = serde_json::from_str(&row.1)?,
                 "agentModel" => settings.model = serde_json::from_str(&row.1)?,
+                "agentProtocol" => settings.protocol = serde_json::from_str(&row.1)?,
                 AGENT_ENABLED_EXPLICITLY_SET_KEY => {
                     enabled_explicitly_set = serde_json::from_str(&row.1)?
                 }
@@ -1196,6 +1197,7 @@ impl StorageService {
             ("agentBaseUrl", serde_json::to_string(&settings.base_url)?),
             ("agentApiKey", serde_json::to_string(&settings.api_key)?),
             ("agentModel", serde_json::to_string(&settings.model)?),
+            ("agentProtocol", serde_json::to_string(&settings.protocol)?),
             (
                 AGENT_ENABLED_EXPLICITLY_SET_KEY,
                 serde_json::to_string(&enabled_explicitly_set)?,
@@ -1298,6 +1300,7 @@ fn has_valid_agent_model_config(settings: &AgentSettingsDto) -> bool {
         && !settings.base_url.trim().is_empty()
         && !settings.api_key.trim().is_empty()
         && !settings.model.trim().is_empty()
+        && (settings.protocol.trim() == "responses" || settings.protocol.trim() == "chat_completions")
 }
 
 fn should_auto_enable_legacy_agent_settings(
@@ -1407,6 +1410,7 @@ mod tests {
             base_url: "https://api.example.com/v1".into(),
             api_key: "test-key".into(),
             model: "gpt-5.4".into(),
+            protocol: "responses".into(),
         }
     }
 

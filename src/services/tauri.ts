@@ -12,7 +12,6 @@ import type {
 } from "@/features/connections/types";
 import type {
   AgentContextDto,
-  AgentToolDescriptor,
   LegacyAgentStatusEvent,
 } from "@/features/agent/types";
 import type {
@@ -44,6 +43,7 @@ export interface AgentSettingsDto {
   baseUrl: string;
   apiKey: string;
   model: string;
+  protocol: "responses" | "chat_completions";
 }
 
 export const defaultAgentSettings: AgentSettingsDto = {
@@ -52,6 +52,7 @@ export const defaultAgentSettings: AgentSettingsDto = {
   baseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-5.4",
+  protocol: "responses",
 };
 
 export interface ConnectionTestResultDto {
@@ -95,6 +96,10 @@ export function normalizeAgentSettings(
       typeof settings?.model === "string" && settings.model.trim().length > 0
         ? settings.model
         : defaultAgentSettings.model,
+    protocol:
+      settings?.protocol === "chat_completions" || settings?.protocol === "responses"
+        ? settings.protocol
+        : defaultAgentSettings.protocol,
   };
 }
 
@@ -252,10 +257,6 @@ export async function exportMessages(request: ExportRequest) {
 
 export async function getAgentContext(connectionId?: string) {
   return invoke<AgentContextDto>("get_agent_context", { connectionId });
-}
-
-export async function listAgentTools() {
-  return invoke<AgentToolDescriptor[]>("list_agent_tools");
 }
 
 export async function getAppSettings() {

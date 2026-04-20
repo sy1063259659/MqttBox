@@ -77,6 +77,17 @@ describe("createDeepAgentTools", () => {
           runtimeSchema: z.object({}),
           handler: vi.fn(),
         },
+        {
+          name: "save_parser_draft",
+          description: "Save parser draft",
+          inputSchema: {},
+          runtimeSchema: z.object({
+            name: z.string(),
+            script: z.string(),
+          }),
+          requiresApproval: true,
+          handler: vi.fn(),
+        },
       ],
     });
 

@@ -16,10 +16,13 @@ interface ConfigUpdateRequestBody {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  protocol?: "responses" | "chat_completions";
 }
 
 interface SessionMessageRequestBody {
   content?: string;
+  mode?: AgentSessionMode;
+  safetyLevel?: AgentSafetyLevel;
   attachments?: AgentAttachmentDto[];
 }
 
@@ -118,14 +121,18 @@ export class HttpServer {
         this.sendJson(res, 201, result);
         return;
       }
+      if (method === "GET" && url.pathname === "/sessions") {
+        this.sendJson(res, 200, this.harness.listSessions());
+        return;
+      }
       const sessionMatch = /^\/sessions\/([^/]+)$/.exec(url.pathname);
       if (method === "GET" && sessionMatch) {
-        const session = this.harness.getSession(decodeURIComponent(sessionMatch[1]));
-        if (!session) {
+        const detail = this.harness.getSessionDetail(decodeURIComponent(sessionMatch[1]));
+        if (!detail) {
           this.sendJson(res, 404, { error: "session_not_found" });
           return;
         }
-        this.sendJson(res, 200, { session });
+        this.sendJson(res, 200, detail);
         return;
       }
       const messageMatch = /^\/sessions\/([^/]+)\/messages$/.exec(url.pathname);
@@ -139,6 +146,8 @@ export class HttpServer {
         const result = await this.harness.appendSessionMessage({
           sessionId: decodeURIComponent(messageMatch[1]),
           message: body.content,
+          mode: body.mode,
+          safetyLevel: body.safetyLevel,
           attachments: Array.isArray(body.attachments) ? body.attachments : [],
         });
         this.sendJson(res, 200, result);
@@ -155,6 +164,8 @@ export class HttpServer {
         await this.handleMessageStream(res, {
           sessionId: decodeURIComponent(messageStreamMatch[1]),
           content: body.content,
+          mode: body.mode,
+          safetyLevel: body.safetyLevel,
           attachments: Array.isArray(body.attachments) ? body.attachments : [],
         });
         return;
@@ -281,6 +292,8 @@ export class HttpServer {
     input: {
       sessionId: string;
       content: string;
+      mode?: AgentSessionMode;
+      safetyLevel?: AgentSafetyLevel;
       attachments: AgentAttachmentDto[];
     },
   ): Promise<void> {
@@ -296,11 +309,13 @@ export class HttpServer {
     };
 
     try {
-      const result = await this.harness.appendSessionMessage({
-        sessionId: input.sessionId,
-        message: input.content,
-        attachments: input.attachments,
-        onEvent: (event) => {
+        const result = await this.harness.appendSessionMessage({
+          sessionId: input.sessionId,
+          message: input.content,
+          mode: input.mode,
+          safetyLevel: input.safetyLevel,
+          attachments: input.attachments,
+          onEvent: (event) => {
           writeChunk({
             kind: "event",
             event,

@@ -11,6 +11,7 @@ import type { ToolRegistry, ToolRunner } from "../tools/index.js";
 export interface ModeInput {
   session: AgentSessionDto;
   message: string;
+  modelMessage?: string;
   attachments: AgentAttachmentDto[];
   onDelta?: (delta: string) => void;
   capabilityId?: string | null;

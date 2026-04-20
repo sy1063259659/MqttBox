@@ -134,7 +134,11 @@ export function SettingsView({
         : !health.model.configured
           ? t("settings.agentStatus.missingKey")
           : t("settings.agentStatus.ready");
-      const status = `${modelState} · ${health.deepagentsRuntime} · ${health.model?.model ?? agentSettings.model}`;
+      const protocolLabel =
+        health.model?.protocol === "chat_completions"
+          ? t("settings.agentProtocol.chatCompletions")
+          : t("settings.agentProtocol.responses");
+      const status = `${modelState} · ${protocolLabel} · ${health.deepagentsRuntime} · ${health.model?.model ?? agentSettings.model}`;
       setAgentHealth(status);
       toast.success(t("toast.agentHealthChecked"));
     } catch (error) {
@@ -279,6 +283,22 @@ export function SettingsView({
               }}
             >
               <option value="openai">OpenAI</option>
+            </Select>
+          </div>
+          <div>
+            <Label>{t("settings.agentProtocol")}</Label>
+            <Select
+              value={agentSettings.protocol}
+              onChange={(event) => {
+                const nextProtocol = event.currentTarget.value as AgentSettingsDto["protocol"];
+                setAgentSettings((current) => ({
+                  ...current,
+                  protocol: nextProtocol,
+                }));
+              }}
+            >
+              <option value="responses">{t("settings.agentProtocol.responses")}</option>
+              <option value="chat_completions">{t("settings.agentProtocol.chatCompletions")}</option>
             </Select>
           </div>
           <div>

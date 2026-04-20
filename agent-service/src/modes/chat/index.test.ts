@@ -34,9 +34,12 @@ describe("ChatModeHandler", () => {
   const input: ModeInput = {
     session: {
       id: "session-1",
-      mode: "chat",
-      safetyLevel: "observe",
       createdAt: "2026-04-15T00:00:00.000Z",
+      updatedAt: "2026-04-15T00:00:00.000Z",
+      title: "Topic diagnosis",
+      lastMessagePreview: null,
+      draftMode: "chat",
+      draftSafetyLevel: "observe",
     },
     message: "diagnose this topic",
     attachments: [

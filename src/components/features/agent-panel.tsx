@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipb
 import { ArrowUp, ChevronDown, ImagePlus, ShieldCheck, X } from "lucide-react";
 import type { AgentArtifactDto, AgentAttachmentDto, ApprovalRequestDto } from "@agent-contracts";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { AgentThreadMessage } from "@/features/agent/types";
@@ -37,27 +36,12 @@ type FeedItem =
       kind: "pending";
       key: string;
       createdAt: string;
+      userMessageId: string | null;
       pending: {
         phase: "sending" | "analyzing" | "planning" | "preparing" | "waiting_for_approval";
         detail: string | null;
       };
     };
-
-function runStatusTone(status: string) {
-  if (status === "failed" || status === "cancelled") {
-    return "error";
-  }
-  if (status === "awaiting_approval" || status === "awaiting_tool") {
-    return "warning";
-  }
-  if (status === "completed") {
-    return "success";
-  }
-  if (status === "running" || status === "planning" || status === "producing_artifact") {
-    return "active";
-  }
-  return "idle";
-}
 
 function humanFileSize(bytes?: number | null) {
   if (!bytes || bytes <= 0) {
@@ -96,6 +80,23 @@ function getArtifactReviewPayload(artifact: AgentArtifactDto) {
     : null;
 }
 
+function parseApprovalInputPreview(preview?: string | null) {
+  if (!preview) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(preview) as Record<string, unknown>;
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSaveParserApproval(request: ApprovalRequestDto) {
+  return request.toolName === "save_parser_draft";
+}
+
 function sortFeedItems(items: FeedItem[]) {
   return [...items].sort((left, right) => {
     const leftTime = Date.parse(left.createdAt);
@@ -105,6 +106,37 @@ function sortFeedItems(items: FeedItem[]) {
     }
     return leftTime - rightTime;
   });
+}
+
+function insertPendingFeedItem(items: FeedItem[], pendingAssistantState: NonNullable<ReturnType<typeof useAgentStore.getState>["pendingAssistantState"]>) {
+  const pendingItem: FeedItem = {
+    kind: "pending",
+    key: `pending-${pendingAssistantState.userMessageId}`,
+    createdAt: pendingAssistantState.createdAt,
+    userMessageId: pendingAssistantState.userMessageId,
+    pending: pendingAssistantState,
+  };
+
+  const nextItems = [...items];
+  const anchorIndex = nextItems.findIndex(
+    (item) => item.kind === "message" && item.message.role === "user" && item.message.id === pendingAssistantState.userMessageId,
+  );
+
+  if (anchorIndex >= 0) {
+    nextItems.splice(anchorIndex + 1, 0, pendingItem);
+    return nextItems;
+  }
+
+  for (let index = nextItems.length - 1; index >= 0; index -= 1) {
+    const item = nextItems[index];
+    if (item.kind === "message" && item.message.role === "user") {
+      nextItems.splice(index + 1, 0, pendingItem);
+      return nextItems;
+    }
+  }
+
+  nextItems.push(pendingItem);
+  return nextItems;
 }
 
 interface ImageAttachmentRules {
@@ -260,6 +292,59 @@ function isTerminalRunStatus(status?: string | null) {
   return !status || status === "idle" || status === "completed" || status === "failed" || status === "cancelled";
 }
 
+function normalizeAssistantDisplayText(content: string) {
+  const withoutCodeFences = content.replace(/```[\w-]*\r?\n?/g, "").replace(/```/g, "");
+  const normalizedLines = withoutCodeFences
+    .split(/\r?\n/)
+    .map((rawLine) => {
+      const trimmedLine = rawLine.trim();
+      if (!trimmedLine) {
+        return "";
+      }
+
+      return trimmedLine
+        .replace(/^#{1,6}\s+/g, "")
+        .replace(/^\*\*(.+?)\*\*$/g, "$1")
+        .replace(/^__(.+?)__$/g, "$1")
+        .replace(/^[-*+]\s+/g, "")
+        .replace(/^\d+\.\s+/g, "")
+        .replace(/^(summary|risks?|assumptions?|next steps?)\s*:\s*/i, "")
+        .replace(/^(summary|risks?|assumptions?|next steps?)$/i, "")
+        .replace(/\*\*(.+?)\*\*/g, "$1")
+        .replace(/__(.+?)__/g, "$1")
+        .replace(/\s+/g, " ")
+        .trim();
+    });
+
+  const paragraphs: string[] = [];
+  let currentParagraph: string[] = [];
+
+  for (const line of normalizedLines) {
+    if (!line) {
+      if (currentParagraph.length > 0) {
+        paragraphs.push(currentParagraph.join("\n"));
+        currentParagraph = [];
+      }
+      continue;
+    }
+
+    currentParagraph.push(line);
+  }
+
+  if (currentParagraph.length > 0) {
+    paragraphs.push(currentParagraph.join("\n"));
+  }
+
+  return paragraphs.join("\n\n").trim();
+}
+
+function splitAssistantParagraphs(content: string) {
+  return content
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+}
+
 export function AgentPanel() {
   const { t } = useI18n();
   const setParserDraft = useParserStore((state) => state.setDraft);
@@ -279,12 +364,10 @@ export function AgentPanel() {
     messages,
     approvals,
     artifacts,
-    context,
     draftPrompt,
     draftAttachments,
     isSubmitting,
     pendingAssistantState,
-    statusMessage,
     setMode,
     setSafetyLevel,
     setDraftPrompt,
@@ -301,40 +384,8 @@ export function AgentPanel() {
       : timeline.runs[0] ?? null;
   }, [timeline.activeRunId, timeline.runs]);
 
-  const activeStepLabel = useMemo(() => {
-    if (!activeRun?.steps.length) {
-      return null;
-    }
-
-    const pendingStep =
-      activeRun.steps.find((step) => step.status === "running" || step.status === "pending") ??
-      [...activeRun.steps].sort((left, right) => right.index - left.index)[0] ??
-      null;
-
-    return pendingStep ? pendingStep.title : null;
-  }, [activeRun]);
-
-  const statusLine = useMemo(() => {
-    if ((runStatus === "failed" || runStatus === "cancelled") && statusMessage) {
-      return statusMessage;
-    }
-    if (activeRun?.goal?.trim()) {
-      return activeRun.goal;
-    }
-    if (pendingAssistantState) {
-      return t(phaseTranslationKey(pendingAssistantState.phase));
-    }
-    return statusMessage;
-  }, [activeRun?.goal, pendingAssistantState, runStatus, statusMessage, t]);
-
-  const statusDetail = useMemo(() => {
-    return [pendingAssistantState?.detail ?? null, activeRun?.capabilityId, activeStepLabel]
-      .filter(Boolean)
-      .join(" · ") || null;
-  }, [activeRun?.capabilityId, activeStepLabel, pendingAssistantState?.detail]);
-
   const feedItems = useMemo(() => {
-    return sortFeedItems([
+    const baseItems = sortFeedItems([
       ...messages.map((message) => ({
         kind: "message" as const,
         key: `message-${message.id}`,
@@ -353,17 +404,13 @@ export function AgentPanel() {
         createdAt: artifact.createdAt,
         artifact,
       })),
-      ...(pendingAssistantState
-        ? [
-            {
-              kind: "pending" as const,
-              key: `pending-${pendingAssistantState.userMessageId}`,
-              createdAt: pendingAssistantState.createdAt,
-              pending: pendingAssistantState,
-            },
-          ]
-        : []),
     ]);
+
+    if (!pendingAssistantState) {
+      return baseItems;
+    }
+
+    return insertPendingFeedItem(baseItems, pendingAssistantState);
   }, [approvals, artifacts, messages, pendingAssistantState]);
 
   const scrollSignature = useMemo(() => {
@@ -503,9 +550,7 @@ export function AgentPanel() {
   const localizedRunStatus = t(runStatusTranslationKey(activeRunStatus));
   const composerStatus = pendingAssistantState
     ? t(phaseTranslationKey(pendingAssistantState.phase))
-    : runActive
-      ? localizedRunStatus
-      : null;
+    : localizedRunStatus;
 
   const submitComposer = () => {
     void submitDraftMessage();
@@ -538,48 +583,36 @@ export function AgentPanel() {
         }}
       />
 
-      <header className="agent-panel-toolbar">
-        <div className="agent-panel-toolbar-primary">
-          <div className="agent-panel-toolbar-copy">
-            <div className="agent-panel-toolbar-title">{t("agent.conversation")}</div>
-            {statusLine ? <div className="agent-panel-toolbar-caption">{statusLine}</div> : null}
-          </div>
-
-          <div className="agent-panel-run-indicator" data-tone={runStatusTone(activeRunStatus)}>
-            <span className="agent-panel-run-indicator-dot" />
-            <span>{localizedRunStatus}</span>
-          </div>
-        </div>
-
-        {statusDetail ? <div className="agent-panel-status-line">{statusDetail}</div> : null}
-      </header>
-
       <div className="agent-panel-body">
         <div className="agent-panel-feed" data-empty={feedItems.length === 0 && !activeRun}>
           {feedItems.length === 0 && !activeRun ? (
-            <div className="agent-panel-empty-state">
-              <div className="agent-panel-empty-title">{t("agent.emptyStateTitle")}</div>
-              <div className="agent-panel-empty-copy">{t("agent.emptyStateBody")}</div>
-              <div className="agent-panel-empty-meta">
-                {context?.selectedTopic ? (
-                  <Badge variant="outline">{context.selectedTopic}</Badge>
-                ) : null}
-                {context?.connectionHealth ? (
-                  <Badge variant="outline">{t("agent.connectionHealth", { value: context.connectionHealth })}</Badge>
-                ) : null}
-                {serviceConfig?.supportsImageInput ? (
-                  <Badge variant="outline">{t("agent.shortcutPaste")}</Badge>
-                ) : null}
-              </div>
-            </div>
+            <div className="agent-panel-empty-state" aria-hidden="true" />
           ) : null}
           {feedItems.map((item) => {
             if (item.kind === "message") {
               const isAssistant = item.message.role === "assistant";
               const isUser = item.message.role === "user";
+              const bodyText = isAssistant
+                ? normalizeAssistantDisplayText(item.message.content)
+                : item.message.content;
+              const assistantParagraphs = isAssistant ? splitAssistantParagraphs(bodyText) : [];
+              const metaLabel = isUser
+                ? null
+                : isAssistant
+                  ? null
+                  : t("agent.roleSystem");
 
               return (
-                <article key={item.key} className="agent-panel-feed-item" data-role={item.message.role}>
+                <article
+                  key={item.key}
+                  className={[
+                    "agent-panel-feed-item",
+                    isAssistant ? "agent-panel-feed-item--assistant-message" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  data-role={item.message.role}
+                >
                   <div
                     className={[
                       "agent-panel-bubble",
@@ -591,13 +624,29 @@ export function AgentPanel() {
                     ].join(" ")}
                   >
                     <div className="agent-panel-message-meta">
-                      <span>{isUser ? t("agent.roleUser") : isAssistant ? t("agent.roleAssistant") : t("agent.roleSystem")}</span>
-                      <span>
+                      {metaLabel ? <span>{metaLabel}</span> : <span aria-hidden="true" />}
+                      <span className="agent-panel-message-meta-time">
                         {item.message.isOptimistic ? t("agent.phaseSending") : formatClock(item.message.createdAt)}
                       </span>
                     </div>
                     <div className="agent-panel-message-body" data-streaming={item.message.isStreaming}>
-                      {item.message.content || "(empty)"}
+                      {isAssistant ? (
+                        assistantParagraphs.length > 0 ? (
+                          assistantParagraphs.map((paragraph, index) => (
+                            <p
+                              key={`${item.message.id}-paragraph-${index}`}
+                              className="agent-panel-message-paragraph"
+                              data-paragraph-index={index}
+                            >
+                              {paragraph}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="agent-panel-message-paragraph">(empty)</p>
+                        )
+                      ) : (
+                        bodyText || "(empty)"
+                      )}
                     </div>
                     {item.message.attachments.length > 0 ? (
                       <div className="agent-panel-message-attachments">
@@ -627,12 +676,12 @@ export function AgentPanel() {
 
             if (item.kind === "pending") {
               return (
-                <article key={item.key} className="agent-panel-feed-item" data-role="assistant">
+                <article
+                  key={item.key}
+                  className="agent-panel-feed-item agent-panel-feed-item--followup"
+                  data-role="assistant"
+                >
                   <div className="agent-panel-pending-block">
-                    <div className="agent-panel-inline-card-meta">
-                      <span className="agent-panel-inline-card-label">{t("agent.roleAssistant")}</span>
-                      <span>{t("agent.pendingLabel")}</span>
-                    </div>
                     <div className="agent-panel-pending-summary">
                       <span className="agent-panel-pending-dot" />
                       {t(phaseTranslationKey(item.pending.phase))}
@@ -646,32 +695,68 @@ export function AgentPanel() {
             }
 
             if (item.kind === "approval") {
+              const isSaveApproval = isSaveParserApproval(item.request);
+              const preview = parseApprovalInputPreview(item.request.inputPreview);
+              const parserName =
+                typeof preview?.name === "string" && preview.name.trim().length > 0
+                  ? preview.name.trim()
+                  : null;
+              const topicFilter =
+                typeof preview?.suggestedTopicFilter === "string" &&
+                preview.suggestedTopicFilter.trim().length > 0
+                  ? preview.suggestedTopicFilter.trim()
+                  : null;
+              const scriptPreview =
+                typeof preview?.scriptPreview === "string" && preview.scriptPreview.trim().length > 0
+                  ? preview.scriptPreview.trim()
+                  : null;
+
               return (
-                <article key={item.key} className="agent-panel-feed-item" data-role="system">
+                <article
+                  key={item.key}
+                  className="agent-panel-feed-item agent-panel-feed-item--followup"
+                  data-role="system"
+                >
                   <div className="agent-panel-inline-card agent-panel-inline-card--approval">
                     <div className="agent-panel-inline-card-meta">
                       <span className="agent-panel-inline-card-label">
                         <ShieldCheck className="size-3.5" />
-                        {t("agent.approvals")}
+                        {isSaveApproval ? t("agent.saveApprovalLabel") : t("agent.approvals")}
                       </span>
                       <span>{formatClock(item.request.requestedAt)}</span>
                     </div>
-                    <div className="agent-panel-inline-card-title">{item.request.title}</div>
-                    <div className="agent-panel-inline-card-copy">{item.request.actionSummary}</div>
+                    <div className="agent-panel-inline-card-title">
+                      {isSaveApproval ? t("agent.saveApprovalTitle") : item.request.title}
+                    </div>
+                    <div className="agent-panel-inline-card-copy">
+                      {item.request.actionSummary}
+                    </div>
+                    {parserName || topicFilter ? (
+                      <div className="agent-panel-approval-summary">
+                        {parserName ? (
+                          <span className="agent-panel-approval-chip">{parserName}</span>
+                        ) : null}
+                        {topicFilter ? (
+                          <span className="agent-panel-approval-chip">{topicFilter}</span>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div className="agent-panel-inline-card-copy">{item.request.reason}</div>
-                    {item.request.inputPreview ? (
+                    {scriptPreview ? (
+                      <pre className="agent-panel-code-preview">{scriptPreview}</pre>
+                    ) : item.request.inputPreview ? (
                       <pre className="agent-panel-code-preview">{item.request.inputPreview}</pre>
                     ) : null}
                     <div className="agent-panel-card-actions">
                       <Button size="sm" onClick={() => void resolveApproval(item.request.id, "approved")}>
-                        {t("agent.approve")}
+                        {isSaveApproval ? t("agent.saveParserAction") : t("agent.approve")}
                       </Button>
                       <Button
                         size="sm"
                         variant="outline"
                         onClick={() => void resolveApproval(item.request.id, "rejected")}
                       >
-                        {t("agent.reject")}
+                        {isSaveApproval ? t("agent.notNow") : t("agent.reject")}
                       </Button>
                     </div>
                   </div>
@@ -681,18 +766,29 @@ export function AgentPanel() {
 
             const reviewPayload = getArtifactReviewPayload(item.artifact);
             const riskPreview = reviewPayload?.risks?.[0] ?? null;
+            const editorPayload = getArtifactEditorPayload(item.artifact);
+            const parserName =
+              typeof editorPayload.name === "string" && editorPayload.name.trim().length > 0
+                ? editorPayload.name.trim()
+                : item.artifact.title;
+            const resultSummary =
+              typeof item.artifact.summary === "string" && item.artifact.summary.trim().length > 0
+                ? item.artifact.summary.trim()
+                : reviewPayload?.summary?.trim() || "";
 
             return (
-              <article key={item.key} className="agent-panel-feed-item" data-role="assistant">
+              <article
+                key={item.key}
+                className="agent-panel-feed-item agent-panel-feed-item--followup"
+                data-role="assistant"
+              >
                 <div className="agent-panel-result-block">
-                  <div className="agent-panel-inline-card-meta">
-                    <span className="agent-panel-inline-card-label">{t("agent.result")}</span>
-                    <span>{formatClock(item.artifact.createdAt)}</span>
+                  <div className="agent-panel-result-header">
+                    <div className="agent-panel-inline-card-title">{parserName}</div>
+                    <div className="agent-panel-result-time">{formatClock(item.artifact.createdAt)}</div>
                   </div>
-                  <div className="agent-panel-inline-card-title">{item.artifact.title}</div>
-                  <div className="agent-panel-inline-card-copy">{item.artifact.summary}</div>
-                  {reviewPayload?.summary ? (
-                    <div className="agent-panel-inline-card-copy">{reviewPayload.summary}</div>
+                  {resultSummary ? (
+                    <div className="agent-panel-inline-card-copy">{resultSummary}</div>
                   ) : null}
                   {riskPreview ? (
                     <div className="agent-panel-result-risk">{riskPreview}</div>
@@ -710,56 +806,56 @@ export function AgentPanel() {
         </div>
       </div>
 
-      <footer className="agent-panel-composer">
-        <div className="agent-panel-composer-shell" ref={composerRef}>
-          {draftAttachments.length > 0 ? (
-            <div className="agent-panel-composer-preview-strip">
-              {draftAttachments.map((attachment) => (
-                <div key={attachment.id} className="agent-panel-composer-preview-chip">
-                  <img
-                    src={attachment.dataUrl}
-                    alt={attachment.filename ?? attachment.id}
-                    className="agent-panel-composer-preview-thumb"
-                  />
-                  <div className="agent-panel-composer-preview-name">
-                    {attachment.filename ?? attachment.id}
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="agent-panel-composer-preview-remove"
-                    aria-label={`${t("button.remove")} ${attachment.filename ?? attachment.id}`}
-                    onClick={() => removeDraftAttachment(attachment.id)}
-                  >
-                    <X className="size-3.5" />
-                  </Button>
+      <footer className="agent-panel-composer" ref={composerRef}>
+        {draftAttachments.length > 0 ? (
+          <div className="agent-panel-composer-preview-strip">
+            {draftAttachments.map((attachment) => (
+              <div key={attachment.id} className="agent-panel-composer-preview-chip">
+                <img
+                  src={attachment.dataUrl}
+                  alt={attachment.filename ?? attachment.id}
+                  className="agent-panel-composer-preview-thumb"
+                />
+                <div className="agent-panel-composer-preview-name">
+                  {attachment.filename ?? attachment.id}
                 </div>
-              ))}
-            </div>
-          ) : null}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="agent-panel-composer-preview-remove"
+                  aria-label={`${t("button.remove")} ${attachment.filename ?? attachment.id}`}
+                  onClick={() => removeDraftAttachment(attachment.id)}
+                >
+                  <X className="size-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : null}
 
-          <Textarea
-            ref={textareaRef}
-            value={draftPrompt}
-            className="agent-panel-composer-textarea"
-            placeholder={t("agent.composerPlaceholder")}
-            onChange={(event) => setDraftPrompt(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
-                return;
-              }
+        <Textarea
+          ref={textareaRef}
+          value={draftPrompt}
+          className="agent-panel-composer-textarea"
+          placeholder={t("agent.composerPlaceholder")}
+          onChange={(event) => setDraftPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+              return;
+            }
 
-              if (sendDisabled) {
-                return;
-              }
+            if (sendDisabled) {
+              return;
+            }
 
-              event.preventDefault();
-              submitComposer();
-            }}
-          />
+            event.preventDefault();
+            submitComposer();
+          }}
+        />
 
-          <div className="agent-panel-composer-bar">
-            <div className="agent-panel-composer-left">
+        <div className="agent-panel-composer-bar">
+          <div className="agent-panel-composer-left">
+            <div className="agent-panel-composer-accessories">
               <Button
                 size="sm"
                 variant="ghost"
@@ -772,8 +868,6 @@ export function AgentPanel() {
               >
                 <ImagePlus className="size-3.5" />
               </Button>
-
-              <span className="agent-panel-composer-divider" aria-hidden="true" />
 
               <div className="agent-panel-composer-menu">
                 <Button
@@ -820,6 +914,7 @@ export function AgentPanel() {
                 >
                   <ShieldCheck className="size-3.5" />
                   {formatControlLabel(safetyLevel)}
+                  <ChevronDown className="size-3.5" />
                 </Button>
                 {openMenu === "safety" ? (
                   <div className="agent-panel-composer-menu-panel" data-kind="safety">
@@ -841,27 +936,27 @@ export function AgentPanel() {
                 ) : null}
               </div>
             </div>
+          </div>
 
-            <div className="agent-panel-composer-right">
-              {composerStatus ? (
-                <div className="agent-panel-composer-status" data-active={runActive}>
-                  <span className="agent-panel-composer-status-dot" />
-                  <span>{composerStatus}</span>
-                </div>
-              ) : null}
+          <div className="agent-panel-composer-right">
+            {composerStatus ? (
+              <div className="agent-panel-composer-status" data-active={runActive}>
+                <span className="agent-panel-composer-status-dot" />
+                <span>{composerStatus}</span>
+              </div>
+            ) : null}
 
-              <Button
-                size="sm"
-                className="agent-panel-send-button"
-                aria-label={t("agent.send")}
-                onClick={() => {
-                  submitComposer();
-                }}
-                disabled={sendDisabled}
-              >
-                <ArrowUp className="size-3.5" />
-              </Button>
-            </div>
+            <Button
+              size="sm"
+              className="agent-panel-send-button"
+              aria-label={t("agent.send")}
+              onClick={() => {
+                submitComposer();
+              }}
+              disabled={sendDisabled}
+            >
+              <ArrowUp className="size-3.5" />
+            </Button>
           </div>
         </div>
       </footer>

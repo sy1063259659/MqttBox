@@ -1,5 +1,5 @@
 import { OpenAIModelClient } from "./openai-model.js";
-import type { ModelClient } from "./types.js";
+import type { ModelClient, ModelProtocol } from "./types.js";
 
 export type ModelProvider = "openai";
 
@@ -9,6 +9,7 @@ export interface ModelFactoryInput {
   baseUrl?: string;
   model?: string;
   enabled?: boolean;
+  protocol?: ModelProtocol;
 }
 
 export function createModelClient(input: ModelFactoryInput): ModelClient {
@@ -19,6 +20,7 @@ export function createModelClient(input: ModelFactoryInput): ModelClient {
         baseUrl: input.baseUrl,
         model: input.model,
         enabled: input.enabled,
+        protocol: input.protocol,
       });
     default: {
       const neverProvider: never = input.provider;

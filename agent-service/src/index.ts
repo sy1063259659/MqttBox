@@ -4,6 +4,7 @@ import { ArtifactStore } from "./artifacts/index.js";
 import { BudgetManager } from "./budget/index.js";
 import { CapabilityRegistry } from "./capabilities/index.js";
 import { DeepAgentsAdapter } from "./integrations/deepagents-adapter.js";
+import { DesktopBridgeClient } from "./integrations/desktop-bridge-client.js";
 import { MemoryStore } from "./memory/index.js";
 import { createModelClient } from "./models/factory.js";
 import { Logger } from "./observability/logger.js";
@@ -27,6 +28,10 @@ async function main(): Promise<void> {
     apiKey: process.env.OPENAI_API_KEY,
     baseUrl: process.env.OPENAI_BASE_URL,
     model: process.env.OPENAI_MODEL,
+    protocol:
+      process.env.OPENAI_PROTOCOL === "chat_completions"
+        ? "chat_completions"
+        : "responses",
   });
   const transport = new InMemoryTransport();
   const wsTransport = new WsTransport(logger, {
@@ -35,12 +40,17 @@ async function main(): Promise<void> {
   const capabilityRegistry = new CapabilityRegistry();
   const memoryStore = new MemoryStore();
   const artifactStore = new ArtifactStore();
+  const desktopBridgeClient = new DesktopBridgeClient({
+    baseUrl: process.env.AGENT_DESKTOP_BRIDGE_URL,
+    token: process.env.AGENT_DESKTOP_BRIDGE_TOKEN,
+  });
   const toolRegistry = new ToolRegistry();
   registerBuiltinTools({
     toolRegistry,
     capabilityRegistry,
     memoryStore,
     artifactStore,
+    desktopBridgeClient,
   });
   const toolRunner = new ToolRunner(toolRegistry);
   const harness = new AgentHarness({

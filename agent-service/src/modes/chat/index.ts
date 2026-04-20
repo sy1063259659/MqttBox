@@ -9,7 +9,7 @@ export class ChatModeHandler implements ModeHandler {
       sessionId: input.session.id,
       runId: input.runId ?? null,
       systemPrompt,
-      userMessage: input.message,
+      userMessage: input.modelMessage ?? input.message,
       attachments: input.attachments,
       onDelta: input.onDelta,
       eventBus: input.eventBus,

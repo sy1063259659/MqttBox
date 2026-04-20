@@ -2,6 +2,7 @@ mod agent;
 mod agent_service;
 mod app_state;
 mod commands;
+mod desktop_bridge;
 mod error;
 mod models;
 mod mqtt;
@@ -10,22 +11,45 @@ mod storage;
 
 use agent_service::ManagedAgentService;
 use app_state::SharedState;
+use desktop_bridge::ManagedDesktopBridge;
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let managed_agent_service = Arc::new(Mutex::new(ManagedAgentService::new()));
+    let managed_desktop_bridge = Arc::new(Mutex::new(ManagedDesktopBridge::new()));
     let agent_service_for_setup = Arc::clone(&managed_agent_service);
     let agent_service_for_run = Arc::clone(&managed_agent_service);
+    let desktop_bridge_for_setup = Arc::clone(&managed_desktop_bridge);
+    let desktop_bridge_for_run = Arc::clone(&managed_desktop_bridge);
 
     let app = tauri::Builder::default()
         .setup(move |app| {
             let shared_state = SharedState::new(app.handle())?;
+            let bridge_config = match desktop_bridge_for_setup.lock() {
+                Ok(mut bridge) => match bridge.ensure_running(Arc::clone(&shared_state.storage)) {
+                    Ok(config) => Some(config),
+                    Err(error) => {
+                        eprintln!("[desktop-bridge] failed to start local parser bridge: {error}");
+                        None
+                    }
+                },
+                Err(_) => {
+                    eprintln!("[desktop-bridge] failed to acquire bridge lock during startup");
+                    None
+                }
+            };
             app.manage(shared_state);
             if let Ok(mut service) = agent_service_for_setup.lock() {
-                if let Err(error) = service.ensure_running(app.handle()) {
-                    eprintln!("[agent-service] failed to auto-start local service: {error}");
+                if let Some(bridge_config) = bridge_config {
+                    if let Err(error) = service.ensure_running(app.handle(), &bridge_config) {
+                        eprintln!("[agent-service] failed to auto-start local service: {error}");
+                    }
+                } else {
+                    eprintln!(
+                        "[agent-service] skipped auto-start because desktop bridge is unavailable"
+                    );
                 }
             }
             Ok(())
@@ -73,6 +97,9 @@ pub fn run() {
         if matches!(event, RunEvent::Exit) {
             if let Ok(mut service) = agent_service_for_run.lock() {
                 service.shutdown();
+            }
+            if let Ok(mut bridge) = desktop_bridge_for_run.lock() {
+                bridge.shutdown();
             }
         }
     });

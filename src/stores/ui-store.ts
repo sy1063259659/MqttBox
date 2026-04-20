@@ -5,13 +5,13 @@ export type OverlayView =
   | "connections"
   | "topics"
   | "message"
-  | "agent"
   | "settings"
   | "parsers"
   | null;
 
 interface UiStore {
   activeOverlay: OverlayView;
+  agentPanelCollapsed: boolean;
   commandPaletteOpen: boolean;
   connectionSidebarCollapsed: boolean;
   publishPanelHeight: number;
@@ -27,6 +27,8 @@ interface UiStore {
   closeSettings: () => void;
   openOverlay: (view: Exclude<OverlayView, null>) => void;
   closeOverlay: () => void;
+  setAgentPanelCollapsed: (collapsed: boolean) => void;
+  toggleAgentPanelCollapsed: () => void;
   setConnectionSidebarCollapsed: (collapsed: boolean) => void;
   toggleConnectionSidebarCollapsed: () => void;
   setPublishPanelHeight: (height: number) => void;
@@ -46,6 +48,7 @@ interface UiStore {
 
 export const useUiStore = create<UiStore>((set) => ({
   activeOverlay: null,
+  agentPanelCollapsed: false,
   commandPaletteOpen: false,
   connectionSidebarCollapsed: false,
   publishPanelHeight: 280,
@@ -67,6 +70,14 @@ export const useUiStore = create<UiStore>((set) => ({
   },
   closeOverlay() {
     set({ activeOverlay: null });
+  },
+  setAgentPanelCollapsed(agentPanelCollapsed) {
+    set({ agentPanelCollapsed });
+  },
+  toggleAgentPanelCollapsed() {
+    set((state) => ({
+      agentPanelCollapsed: !state.agentPanelCollapsed,
+    }));
   },
   setConnectionSidebarCollapsed(connectionSidebarCollapsed) {
     set({ connectionSidebarCollapsed });

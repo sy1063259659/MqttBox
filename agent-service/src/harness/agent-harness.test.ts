@@ -15,24 +15,72 @@ import { ToolRegistry } from "../tools/registry.js";
 import { ToolRunner } from "../tools/runner.js";
 import { AgentHarness } from "./agent-harness.js";
 import { TypedEventBus } from "./event-bus.js";
+import type { AgentSessionDetailDto } from "@agent-contracts";
 
 class TestSessionStore {
-  private readonly sessions = new Map<string, AgentSessionDto>();
+  private readonly sessions = new Map<string, AgentSessionDetailDto>();
 
-  create(mode: AgentSessionDto["mode"], safetyLevel: AgentSessionDto["safetyLevel"]): AgentSessionDto {
-    const session: AgentSessionDto = {
-      id: `session-${this.sessions.size + 1}`,
-      mode,
-      safetyLevel,
-      createdAt: new Date().toISOString(),
-      workspaceId: null,
+  create(mode: AgentSessionDto["draftMode"], safetyLevel: AgentSessionDto["draftSafetyLevel"]): AgentSessionDetailDto {
+    const createdAt = new Date().toISOString();
+    const detail: AgentSessionDetailDto = {
+      session: {
+        id: `session-${this.sessions.size + 1}`,
+        createdAt,
+        updatedAt: createdAt,
+        title: "New conversation",
+        lastMessagePreview: null,
+        draftMode: mode,
+        draftSafetyLevel: safetyLevel,
+        workspaceId: null,
+      },
+      timeline: {
+        activeRunId: null,
+        runs: [],
+        latestPlan: null,
+      },
+      messages: [],
+      approvals: [],
+      approvalHistory: [],
+      artifacts: [],
+      contextSummary: null,
     };
-    this.sessions.set(session.id, session);
-    return session;
+    this.sessions.set(detail.session.id, detail);
+    return detail;
   }
 
   getById(sessionId: string): AgentSessionDto | null {
+    return this.sessions.get(sessionId)?.session ?? null;
+  }
+
+  getDetail(sessionId: string): AgentSessionDetailDto | null {
     return this.sessions.get(sessionId) ?? null;
+  }
+
+  list(): AgentSessionDto[] {
+    return [...this.sessions.values()].map((detail) => detail.session);
+  }
+
+  updateDraftPreferences(
+    sessionId: string,
+    draftMode: AgentSessionDto["draftMode"],
+    draftSafetyLevel: AgentSessionDto["draftSafetyLevel"],
+  ): AgentSessionDto | null {
+    const detail = this.sessions.get(sessionId);
+    if (!detail) {
+      return null;
+    }
+
+    detail.session = {
+      ...detail.session,
+      draftMode,
+      draftSafetyLevel,
+    };
+    this.sessions.set(sessionId, detail);
+    return detail.session;
+  }
+
+  applyEvent(event: AgentEvent): AgentSessionDetailDto | null {
+    return this.getDetail(event.sessionId);
   }
 }
 
@@ -166,6 +214,7 @@ function createHarnessFixture(): HarnessFixture {
       apiKey: "test-key",
       baseUrl: "http://localhost/mock",
       model: "test-model",
+      protocol: "responses" as const,
     })),
     getConfigSummary: vi.fn(() => ({
       provider: "mock",
@@ -173,6 +222,7 @@ function createHarnessFixture(): HarnessFixture {
       model: "test-model",
       baseUrl: "http://localhost/mock",
       enabled: true,
+      protocol: "responses" as const,
     })),
   };
 
@@ -234,8 +284,8 @@ describe("AgentHarness", () => {
 
     expect(result.session).toMatchObject({
       id: "session-1",
-      mode: "chat",
-      safetyLevel: "observe",
+      draftMode: "chat",
+      draftSafetyLevel: "observe",
       workspaceId: null,
     });
     expect(eventTypes(result.events)).toEqual(["session.start"]);
@@ -461,6 +511,155 @@ describe("AgentHarness", () => {
       }),
     );
     expect(fixture.modelGenerate).not.toHaveBeenCalled();
+  });
+
+  it("smoke-tests parser drafts with the registered parser test tool before emitting the artifact", async () => {
+    const fixture = createHarnessFixture();
+    fixture.toolRegistry.register({
+      name: "test_parser_script",
+      description: "Run parser script against sample payload",
+      inputSchema: {},
+      handler: async () => ({
+        ok: true,
+        output: {
+          ok: true,
+          parsedPayloadJson: "{\"byteLength\":4}",
+          parseError: null,
+        },
+      }),
+    });
+    await fixture.harness.start();
+    const { session } = fixture.harness.createSession({ mode: "execute", safetyLevel: "draft" });
+
+    const result = await fixture.harness.appendSessionMessage({
+      sessionId: session.id,
+      message: "Create parser for topic: devices/temperature using payload bytes",
+    });
+
+    const artifactReady = requireEvent(result.events, "artifact.ready");
+    expect(artifactReady.payload.artifact.payload).toMatchObject({
+      reviewPayload: expect.objectContaining({
+        summary: expect.stringContaining("Smoke test passed against 01020304."),
+        testResult: expect.objectContaining({
+          ok: true,
+          payloadHex: "01020304",
+        }),
+      }),
+    });
+    expect(eventTypes(result.events)).toContain("tool.request");
+    expect(eventTypes(result.events)).toContain("tool.result");
+  });
+
+  it("fails execute-mode parser authoring without emitting an artifact when helper compliance is rejected", async () => {
+    const fixture = createHarnessFixture();
+    await fixture.harness.start();
+    const { session } = fixture.harness.createSession({ mode: "execute", safetyLevel: "draft" });
+
+    fixture.deepAgentsRunExecute.mockRejectedValueOnce(
+      new Error(
+        "Parser draft did not satisfy the built-in helper requirements: Use explicit LE helpers for the multi-byte fields described as little-endian.",
+      ),
+    );
+
+    const result = await fixture.harness.appendSessionMessage({
+      sessionId: session.id,
+      message:
+        "Create parser for topic: devices/status. Bytes 0-1 are little-endian voltage and byte 2 contains alarm bits.",
+    });
+
+    expect(result.assistantContent).toContain("built-in helper requirements");
+    expect(eventTypes(result.events)).toContain("service.error");
+    expect(eventTypes(result.events)).not.toContain("artifact.ready");
+    expect(eventTypes(result.events)).not.toContain("approval.requested");
+    expect(requireEvent(result.events, "assistant.final")).toMatchObject({
+      payload: {
+        finishReason: "error",
+        content: expect.stringContaining("built-in helper requirements"),
+      },
+    });
+    expect(requireEvent(result.events, "run.completed")).toMatchObject({
+      payload: {
+        run: expect.objectContaining({
+          status: "failed",
+        }),
+      },
+    });
+  });
+
+  it("requests explicit approval before saving parser drafts and saves only after approval", async () => {
+    const fixture = createHarnessFixture();
+    fixture.toolRegistry.register({
+      name: "list_saved_parsers",
+      description: "List saved parsers",
+      inputSchema: {},
+      handler: async () => ({
+        ok: true,
+        output: {
+          items: [],
+          total: 0,
+        },
+      }),
+    });
+    fixture.toolRegistry.register({
+      name: "save_parser_draft",
+      description: "Save parser draft",
+      inputSchema: {},
+      toolKind: "mutation",
+      riskLevel: "medium",
+      allowedModes: ["execute"],
+      minSafetyLevel: "draft",
+      requiresApproval: true,
+      idempotent: false,
+      handler: async (input) => ({
+        ok: true,
+        output: {
+          id: "saved-parser-1",
+          ...(typeof input === "object" && input !== null ? input : {}),
+        },
+      }),
+    });
+    await fixture.harness.start();
+    const { session } = fixture.harness.createSession({ mode: "execute", safetyLevel: "draft" });
+
+    const appendResult = await fixture.harness.appendSessionMessage({
+      sessionId: session.id,
+      message: "Create and save parser for topic: devices/temperature",
+    });
+
+    expect(eventTypes(appendResult.events)).toContain("artifact.ready");
+    expect(eventTypes(appendResult.events)).toContain("approval.requested");
+    expect(eventTypes(appendResult.events)).not.toContain("run.completed");
+    const approvalRequested = requireEvent(appendResult.events, "approval.requested");
+    expect(approvalRequested.payload.request.toolName).toBe("save_parser_draft");
+    expect(appendResult.assistantContent).toContain("awaiting approval");
+
+    const resolveResult = await fixture.harness.resolveApproval(
+      session.id,
+      approvalRequested.payload.request.id,
+      "approved",
+    );
+
+    expect(eventTypes(resolveResult.events)).toEqual([
+      "approval.resolved",
+      "tool.request",
+      "tool.result",
+      "assistant.final",
+      "run.completed",
+    ]);
+    expect(requireEvent(resolveResult.events, "tool.request")).toMatchObject({
+      payload: {
+        tool: expect.objectContaining({
+          id: "save_parser_draft",
+          requiresApproval: true,
+        }),
+      },
+    });
+    expect(requireEvent(resolveResult.events, "assistant.final")).toMatchObject({
+      payload: {
+        content: 'Saved parser draft "Devices Temperature Parser" to the local Parser Library.',
+        finishReason: "stop",
+      },
+    });
   });
 
   it("requests approval in confirm mode and completes the run after approval is granted", async () => {

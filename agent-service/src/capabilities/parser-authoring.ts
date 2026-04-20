@@ -5,6 +5,7 @@ import type {
   AgentRunDto,
   AgentSafetyLevel,
   AgentSessionDto,
+  AgentSessionMode,
   ApprovalRequestDto,
   ExecutionPlanDto,
   ExecutionStepDto,
@@ -23,6 +24,8 @@ export interface ParserAuthoringHandlerContract {
     runId: string;
     goal: string;
     capabilityId: string;
+    mode: AgentSessionMode;
+    safetyLevel: AgentSafetyLevel;
     status: RunStatus;
     startedAt: string;
     completedAt?: string | null;
@@ -44,6 +47,14 @@ export interface ParserAuthoringHandlerContract {
     attachmentCount: number;
     artifactCandidate: unknown;
   }): { artifact: AgentArtifactDto | null; error: string | null };
+  shouldRequestSave(request: string): boolean;
+  createSaveApprovalRequest(input: {
+    runId: string;
+    request: string;
+    safetyLevel: AgentSafetyLevel;
+    artifact: AgentArtifactDto;
+    existingParserId?: string | null;
+  }): ApprovalRequestDto;
 }
 
 export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
@@ -52,6 +63,8 @@ export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
     runId: string;
     goal: string;
     capabilityId: string;
+    mode: AgentSessionMode;
+    safetyLevel: AgentSafetyLevel;
     status: RunStatus;
     startedAt: string;
     completedAt?: string | null;
@@ -59,8 +72,8 @@ export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
     return {
       id: input.runId,
       sessionId: input.session.id,
-      mode: input.session.mode,
-      safetyLevel: input.session.safetyLevel,
+      mode: input.mode,
+      safetyLevel: input.safetyLevel,
       capabilityId: input.capabilityId,
       status: input.status,
       goal: input.goal,
@@ -177,28 +190,30 @@ export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
     const summary =
       this.readNonEmptyString(candidate.summary) ??
       this.readNonEmptyString(reviewCandidate.summary) ??
-      `Parser draft for ${topicFilter}`;
+      (requestSummary
+        ? `Parser draft for ${topicFilter} based on ${requestSummary}.`
+        : `Parser draft for ${topicFilter}.`);
     const sourceSampleSummary =
       this.readNonEmptyString(payloadCandidate.sourceSampleSummary) ?? requestSummary;
     const generatedFromImages =
       input.attachmentCount > 0
-        ? `Generated from execute mode with ${input.attachmentCount} image attachment(s).`
-        : "Generated from execute mode without attachments.";
+        ? `Inferred from ${input.attachmentCount} attached protocol image(s) and the current request.`
+        : "Inferred from the current request without image attachments.";
     const reviewSummary =
       this.readNonEmptyString(reviewCandidate.summary) ??
       `${generatedFromImages} Draft targets ${topicFilter}.`;
     const assumptions = this.readStringList(reviewCandidate.assumptions, [
-      "Input topic structure remains stable enough to derive the parser name.",
-      "The generated draft still needs human review before production use.",
+      "The topic naming is stable enough to keep the current parser name and topic filter.",
+      "Byte offsets and scaling still need one live payload verification run before production use.",
     ]);
     const risks = this.readStringList(reviewCandidate.risks, [
-      "Payload field semantics still need validation in ParserLibrary test runs.",
-      "Generated field names may need adjustment after comparing against live samples.",
+      "Payload field semantics still need validation in Parser Library test runs.",
+      "Field naming, scaling, or endian assumptions may need adjustment after comparing against live samples.",
     ]);
     const nextSteps = this.readStringList(reviewCandidate.nextSteps, [
-      "Open the draft in ParserLibrary.",
+      "Open the draft in Parser Library.",
       "Run the suggested payload smoke test and adjust field extraction.",
-      "Save the parser once the topic filter and output shape are confirmed.",
+      "Save the parser once the topic filter, field names, and output shape are confirmed.",
     ]);
 
     return {
@@ -228,6 +243,57 @@ export class ParserAuthoringHandler implements ParserAuthoringHandlerContract {
         createdAt: new Date().toISOString(),
       },
       error: null,
+    };
+  }
+
+  shouldRequestSave(request: string): boolean {
+    return /\b(save|persist|store|commit|overwrite|replace|update)\b|保存|落库|覆盖|替换|更新/.test(
+      request.toLowerCase(),
+    );
+  }
+
+  createSaveApprovalRequest(input: {
+    runId: string;
+    request: string;
+    safetyLevel: AgentSafetyLevel;
+    artifact: AgentArtifactDto;
+    existingParserId?: string | null;
+  }): ApprovalRequestDto {
+    const payload = this.asRecord(input.artifact.payload);
+    const editorPayload = this.asRecord(payload?.editorPayload);
+    const parserName =
+      this.readNonEmptyString(editorPayload?.name) ??
+      this.readNonEmptyString(input.artifact.title) ??
+      "Parser Draft";
+    const script = this.readNonEmptyString(editorPayload?.script) ?? "";
+    const suggestedTopicFilter = this.readNonEmptyString(payload?.suggestedTopicFilter);
+
+    return {
+      id: randomUUID(),
+      runId: input.runId,
+      stepId: null,
+      toolName: "save_parser_draft",
+      title: "Approve saving parser draft",
+      actionSummary: input.existingParserId
+        ? `Overwrite local parser "${parserName}" in Parser Library`
+        : `Save parser draft "${parserName}" to Parser Library`,
+      reason:
+        input.request.trim().slice(0, 160) ||
+        "Parser draft save requests require explicit confirmation.",
+      riskLevel: "medium",
+      safetyLevel: input.safetyLevel,
+      inputPreview: JSON.stringify(
+        {
+          ...(input.existingParserId ? { id: input.existingParserId } : {}),
+          name: parserName,
+          suggestedTopicFilter,
+          scriptPreview: script.slice(0, 240),
+        },
+        null,
+        2,
+      ),
+      requestedAt: new Date().toISOString(),
+      expiresAt: null,
     };
   }
 

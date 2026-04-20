@@ -7,12 +7,14 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
+import { PanelRightClose } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { toast, Toaster } from "sonner";
 
 import { restoreAgentServiceRuntime } from "@/app/layout/agent-bootstrap";
 import { AgentPanel } from "@/components/features/agent-panel";
 import { AppTitlebar } from "@/components/features/app-titlebar";
+import { Button } from "@/components/ui/button";
 import { ConnectionEditor } from "@/components/features/connection-editor";
 import { ConnectionSidebar } from "@/components/features/connection-sidebar";
 import {
@@ -98,14 +100,17 @@ function AppWorkbenchContent({
   const { loadMessages, handleIncoming } = messageStore;
   const {
     loadContext,
-    loadTools,
     loadServiceHealth,
     loadServiceConfig,
+    initializeSessionState,
+    createNewSession,
+    setActiveSession,
     applyIncomingEvent,
     setStatusMessage,
   } = agentStore;
   const {
     activeOverlay,
+    agentPanelCollapsed,
     closeOverlay,
     closeSettings,
     setAppReady,
@@ -131,6 +136,7 @@ function AppWorkbenchContent({
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [editorFolderId, setEditorFolderId] = useState<string | null>(null);
   const [payloadViewMode, setPayloadViewMode] = useState<PayloadViewMode>("hex");
+  const [showAgentSessionHistory, setShowAgentSessionHistory] = useState(false);
   const bootstrapStartedRef = useRef(false);
   const messageLoadDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastMessageConnectionIdRef = useRef<string | null>(null);
@@ -193,6 +199,25 @@ function AppWorkbenchContent({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeOverlay, closeOverlay, closeSettings, setTheme, settings.theme]);
+
+  useEffect(() => {
+    if (!showAgentSessionHistory) {
+      return;
+    }
+
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".workspace-agent-panel-session-menu")) {
+        return;
+      }
+      setShowAgentSessionHistory(false);
+    };
+
+    document.addEventListener("mousedown", onPointerDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+    };
+  }, [showAgentSessionHistory]);
 
   useLayoutEffect(() => {
     const container = workspaceMainRef.current;
@@ -279,12 +304,18 @@ function AppWorkbenchContent({
         }
 
         setAppReady(true);
-        void loadTools().catch(() => undefined);
         void restoreAgentServiceRuntime(loadedAgentSettings, {
           loadServiceHealth,
           loadServiceConfig,
           setStatusMessage,
-        }).catch(() => undefined);
+        })
+          .then((result) => {
+            if (!result.restored) {
+              return;
+            }
+            return initializeSessionState();
+          })
+          .catch(() => undefined);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : t("toast.initFailed"));
       } finally {
@@ -294,7 +325,7 @@ function AppWorkbenchContent({
     };
 
     void bootstrap();
-  }, [hydrateActiveConnection, loadFolders, loadProfiles, loadServiceConfig, loadServiceHealth, loadTools, parserStore, setAppReady, setBootstrapping, setSettings, setStatusMessage, setTheme, t]);
+  }, [hydrateActiveConnection, initializeSessionState, loadFolders, loadProfiles, loadServiceConfig, loadServiceHealth, parserStore, setAppReady, setBootstrapping, setSettings, setStatusMessage, setTheme, t]);
 
   useEffect(() => {
     if (!connectionStore.activeConnectionId) {
@@ -397,6 +428,11 @@ function AppWorkbenchContent({
       status: "idle",
       lastError: null,
     };
+  const activeAgentSessionId = agentStore.activeSessionId;
+  const activeAgentSessionTitle = agentStore.session?.title ?? t("agent.newSession");
+  const historicalAgentSessions = agentStore.sessionSummaries.filter(
+    (session) => session.id !== activeAgentSessionId,
+  );
   const hasActiveConnection = Boolean(connectionStore.activeConnectionId);
   const isActiveConnectionConnected = activeRuntime.status === "connected";
   const subscriptionActionsDisabled = !hasActiveConnection || !isActiveConnectionConnected;
@@ -426,8 +462,9 @@ function AppWorkbenchContent({
           >
             <UtilityRail
               activeOverlay={uiStore.activeOverlay}
+              agentPanelCollapsed={agentPanelCollapsed}
               onOpenParsers={() => uiStore.openOverlay("parsers")}
-              onOpenAgent={() => uiStore.openOverlay("agent")}
+              onToggleAgentPanel={uiStore.toggleAgentPanelCollapsed}
             />
 
             <ConnectionSidebar
@@ -526,57 +563,63 @@ function AppWorkbenchContent({
             ref={workspaceMainRef}
             className={cn("workspace-main", isResizingPublishPanel && "is-resizing")}
           >
-            <section className="workspace-topbar">
-              <MessageWorkspaceToolbar
-                filter={messageStore.filter}
-                isPaused={messageStore.isPaused}
-                payloadViewMode={payloadViewMode}
-                actionsDisabled={messageActionsDisabled}
-                onFilterChange={(filter) => {
-                  messageStore.setFilter(filter);
-                }}
-                onPayloadViewModeChange={setPayloadViewMode}
-                onTogglePause={messageStore.togglePause}
-                onClear={async () => {
-                  if (!connectionStore.activeConnectionId) {
-                    return;
-                  }
-                  try {
-                    await messageStore.clear(connectionStore.activeConnectionId);
-                    toast.success(t("toast.historyCleared"));
-                  } catch (error) {
-                    toast.error(getErrorMessage(error));
-                  }
-                }}
-                onExport={async () => {
-                  if (!connectionStore.activeConnectionId) {
-                    return;
-                  }
+            <div
+              className={cn(
+                "workspace-main-grid",
+                agentPanelCollapsed && "is-agent-panel-collapsed",
+              )}
+            >
+              <section className="workspace-topbar">
+                <MessageWorkspaceToolbar
+                  filter={messageStore.filter}
+                  isPaused={messageStore.isPaused}
+                  payloadViewMode={payloadViewMode}
+                  actionsDisabled={messageActionsDisabled}
+                  onFilterChange={(filter) => {
+                    messageStore.setFilter(filter);
+                  }}
+                  onPayloadViewModeChange={setPayloadViewMode}
+                  onTogglePause={messageStore.togglePause}
+                  onClear={async () => {
+                    if (!connectionStore.activeConnectionId) {
+                      return;
+                    }
+                    try {
+                      await messageStore.clear(connectionStore.activeConnectionId);
+                      toast.success(t("toast.historyCleared"));
+                    } catch (error) {
+                      toast.error(getErrorMessage(error));
+                    }
+                  }}
+                  onExport={async () => {
+                    if (!connectionStore.activeConnectionId) {
+                      return;
+                    }
 
-                  const path = await save({
-                    defaultPath: "mqttbox-messages.json",
-                  });
-
-                  if (!path) {
-                    return;
-                  }
-
-                  try {
-                    await messageStore.export({
-                      connectionId: connectionStore.activeConnectionId,
-                      format: path.endsWith(".csv") ? "csv" : "json",
-                      path,
+                    const path = await save({
+                      defaultPath: "mqttbox-messages.json",
                     });
-                    toast.success(t("toast.exported"));
-                  } catch (error) {
-                    toast.error(getErrorMessage(error));
-                  }
-                }}
-              />
-            </section>
 
-            <div className="workspace-workbench">
-              <section className="workspace-subscriptions workspace-subscriptions-panel">
+                    if (!path) {
+                      return;
+                    }
+
+                    try {
+                      await messageStore.export({
+                        connectionId: connectionStore.activeConnectionId,
+                        format: path.endsWith(".csv") ? "csv" : "json",
+                        path,
+                      });
+                      toast.success(t("toast.exported"));
+                    } catch (error) {
+                      toast.error(getErrorMessage(error));
+                    }
+                  }}
+                />
+              </section>
+
+              <div className="workspace-workbench-core">
+                <section className="workspace-subscriptions workspace-subscriptions-panel">
                 <SubscriptionPanel
                   connectionId={connectionStore.activeConnectionId}
                   connectionName={activeConnection?.name ?? null}
@@ -632,124 +675,212 @@ function AppWorkbenchContent({
                     }
                   }}
                 />
-              </section>
+                </section>
 
-              <section className="workspace-conversation">
-                <div className="workspace-conversation-panel">
-                  <MessageTable
-                    items={messageStore.items}
-                    filter={messageStore.filter}
-                    isPaused={messageStore.isPaused}
-                    payloadViewMode={payloadViewMode}
-                    isLoading={messageStore.isLoading}
-                    hasMore={messageStore.hasMore}
-                    actionsDisabled={messageActionsDisabled}
-                    showToolbar={false}
-                    onFilterChange={(filter) => {
-                      messageStore.setFilter(filter);
-                    }}
-                    onPayloadViewModeChange={setPayloadViewMode}
-                    onTogglePause={messageStore.togglePause}
-                    onClear={async () => {
-                      if (!connectionStore.activeConnectionId) {
-                        return;
-                      }
-                      try {
-                        await messageStore.clear(connectionStore.activeConnectionId);
-                        toast.success(t("toast.historyCleared"));
-                      } catch (error) {
-                        toast.error(getErrorMessage(error));
-                      }
-                    }}
-                    onExport={async () => {
-                      if (!connectionStore.activeConnectionId) {
-                        return;
-                      }
-
-                      const path = await save({
-                        defaultPath: "mqttbox-messages.json",
-                      });
-
-                      if (!path) {
-                        return;
-                      }
-
-                      try {
-                        await messageStore.export({
-                          connectionId: connectionStore.activeConnectionId,
-                          format: path.endsWith(".csv") ? "csv" : "json",
-                          path,
-                        });
-                        toast.success(t("toast.exported"));
-                      } catch (error) {
-                        toast.error(getErrorMessage(error));
-                      }
-                    }}
-                    onLoadMore={async () => {
-                      if (!connectionStore.activeConnectionId) {
-                        return;
-                      }
-                      try {
-                        await messageStore.loadMore(connectionStore.activeConnectionId);
-                      } catch (error) {
-                        toast.error(getErrorMessage(error));
-                      }
-                    }}
-                  />
-
-                  <div
-                    className="workspace-main-divider"
-                    role="separator"
-                    aria-orientation="horizontal"
-                    aria-label={t("publish.title")}
-                    onPointerDown={(event) => {
-                      if (!workspaceMainRef.current) {
-                        return;
-                      }
-                      publishResizeRef.current = {
-                        startY: event.clientY,
-                        startHeight: uiStore.publishPanelHeight,
-                        maxHeight: Math.max(
-                          200,
-                          Math.floor(workspaceMainRef.current.clientHeight * 0.45),
-                        ),
-                      };
-                      setIsResizingPublishPanel(true);
-                      document.body.style.cursor = "row-resize";
-                      document.body.style.userSelect = "none";
-                    }}
-                  >
-                    <span className="workspace-main-divider-handle" />
-                  </div>
-
-                  <div
-                    className="workspace-main-bottom"
-                    style={{ height: uiStore.publishPanelHeight }}
-                  >
-                    <PublishComposer
-                      connectionId={connectionStore.activeConnectionId}
-                      height={uiStore.publishPanelHeight}
-                      disabled={publishActionsDisabled}
-                      onBlockedSend={(reason) => {
-                        toast.error(reason);
+                <section className="workspace-conversation">
+                  <div className="workspace-conversation-panel">
+                    <MessageTable
+                      items={messageStore.items}
+                      filter={messageStore.filter}
+                      isPaused={messageStore.isPaused}
+                      payloadViewMode={payloadViewMode}
+                      isLoading={messageStore.isLoading}
+                      hasMore={messageStore.hasMore}
+                      actionsDisabled={messageActionsDisabled}
+                      showToolbar={false}
+                      onFilterChange={(filter) => {
+                        messageStore.setFilter(filter);
                       }}
-                      onPublish={async (request) => {
+                      onPayloadViewModeChange={setPayloadViewMode}
+                      onTogglePause={messageStore.togglePause}
+                      onClear={async () => {
                         if (!connectionStore.activeConnectionId) {
                           return;
                         }
                         try {
-                          await messageStore.publish({
+                          await messageStore.clear(connectionStore.activeConnectionId);
+                          toast.success(t("toast.historyCleared"));
+                        } catch (error) {
+                          toast.error(getErrorMessage(error));
+                        }
+                      }}
+                      onExport={async () => {
+                        if (!connectionStore.activeConnectionId) {
+                          return;
+                        }
+
+                        const path = await save({
+                          defaultPath: "mqttbox-messages.json",
+                        });
+
+                        if (!path) {
+                          return;
+                        }
+
+                        try {
+                          await messageStore.export({
                             connectionId: connectionStore.activeConnectionId,
-                            ...request,
+                            format: path.endsWith(".csv") ? "csv" : "json",
+                            path,
                           });
-                          toast.success(t("toast.publishRequested"));
+                          toast.success(t("toast.exported"));
+                        } catch (error) {
+                          toast.error(getErrorMessage(error));
+                        }
+                      }}
+                      onLoadMore={async () => {
+                        if (!connectionStore.activeConnectionId) {
+                          return;
+                        }
+                        try {
+                          await messageStore.loadMore(connectionStore.activeConnectionId);
                         } catch (error) {
                           toast.error(getErrorMessage(error));
                         }
                       }}
                     />
+
+                    <div
+                      className="workspace-main-divider"
+                      role="separator"
+                      aria-orientation="horizontal"
+                      aria-label={t("publish.title")}
+                      onPointerDown={(event) => {
+                        if (!workspaceMainRef.current) {
+                          return;
+                        }
+                        publishResizeRef.current = {
+                          startY: event.clientY,
+                          startHeight: uiStore.publishPanelHeight,
+                          maxHeight: Math.max(
+                            200,
+                            Math.floor(workspaceMainRef.current.clientHeight * 0.45),
+                          ),
+                        };
+                        setIsResizingPublishPanel(true);
+                        document.body.style.cursor = "row-resize";
+                        document.body.style.userSelect = "none";
+                      }}
+                    >
+                      <span className="workspace-main-divider-handle" />
+                    </div>
+
+                    <div
+                      className="workspace-main-bottom"
+                      style={{ height: uiStore.publishPanelHeight }}
+                    >
+                      <PublishComposer
+                        connectionId={connectionStore.activeConnectionId}
+                        height={uiStore.publishPanelHeight}
+                        disabled={publishActionsDisabled}
+                        onBlockedSend={(reason) => {
+                          toast.error(reason);
+                        }}
+                        onPublish={async (request) => {
+                          if (!connectionStore.activeConnectionId) {
+                            return;
+                          }
+                          try {
+                            await messageStore.publish({
+                              connectionId: connectionStore.activeConnectionId,
+                              ...request,
+                            });
+                            toast.success(t("toast.publishRequested"));
+                          } catch (error) {
+                            toast.error(getErrorMessage(error));
+                          }
+                        }}
+                      />
+                    </div>
                   </div>
-                </div>
+                </section>
+              </div>
+
+              <section
+                className={cn(
+                  "workspace-agent-panel",
+                  agentPanelCollapsed && "is-collapsed",
+                )}
+                aria-hidden={agentPanelCollapsed}
+              >
+                {!agentPanelCollapsed ? (
+                  <div className="workspace-agent-panel-shell">
+                    <div className="workspace-agent-panel-header">
+                      <div className="workspace-agent-panel-header-main">
+                        <div className="workspace-agent-panel-title">{t("agent.panelTitle")}</div>
+                        <div className="workspace-agent-panel-session-title" title={activeAgentSessionTitle}>
+                          {activeAgentSessionTitle}
+                        </div>
+                      </div>
+                      <div className="workspace-agent-panel-header-actions">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="workspace-agent-panel-session-button"
+                          onClick={() => {
+                            void createNewSession();
+                            setShowAgentSessionHistory(false);
+                          }}
+                        >
+                          {t("agent.newSession")}
+                        </Button>
+                        <div className="workspace-agent-panel-session-menu">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="workspace-agent-panel-session-button"
+                            onClick={() => setShowAgentSessionHistory((current) => !current)}
+                          >
+                            {t("agent.historySessions")}
+                          </Button>
+                          {showAgentSessionHistory ? (
+                            <div className="workspace-agent-panel-session-popover">
+                              {historicalAgentSessions.length > 0 ? (
+                                historicalAgentSessions.map((session) => (
+                                  <button
+                                    key={session.id}
+                                    type="button"
+                                    className="workspace-agent-panel-session-item"
+                                    onClick={() => {
+                                      setShowAgentSessionHistory(false);
+                                      void setActiveSession(session.id);
+                                    }}
+                                  >
+                                    <span className="workspace-agent-panel-session-item-title">
+                                      {session.title}
+                                    </span>
+                                    {session.lastMessagePreview ? (
+                                      <span className="workspace-agent-panel-session-item-preview">
+                                        {session.lastMessagePreview}
+                                      </span>
+                                    ) : null}
+                                  </button>
+                                ))
+                              ) : (
+                                <div className="workspace-agent-panel-session-empty">
+                                  {t("agent.noHistorySessions")}
+                                </div>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="workspace-agent-panel-toggle"
+                          aria-label={t("agent.hidePanel")}
+                          title={t("agent.hidePanel")}
+                          onClick={uiStore.toggleAgentPanelCollapsed}
+                        >
+                          <PanelRightClose className="size-4" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="workspace-agent-panel-body">
+                      <AgentPanel />
+                    </div>
+                  </div>
+                ) : null}
               </section>
             </div>
 
@@ -810,15 +941,6 @@ function AppWorkbenchContent({
               <ParserLibrary />
             </OverlaySheet>
 
-            <OverlaySheet
-              open={uiStore.activeOverlay === "agent"}
-              title={t("overlay.agent.title")}
-              position="right"
-              width="md"
-              onClose={uiStore.closeOverlay}
-            >
-              <AgentPanel />
-            </OverlaySheet>
             </main>
           </div>
         ) : (

@@ -2,6 +2,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::{
+    agent_service::list_live_agent_tools,
     app_state::SharedState,
     error::AppError,
     models::{
@@ -606,8 +607,12 @@ pub fn get_agent_context(
 }
 
 #[tauri::command]
-pub fn list_agent_tools(state: State<'_, SharedState>) -> Result<Vec<AgentToolDescriptor>, String> {
-    Ok(state.agent.lock().unwrap().list_tools())
+pub fn list_agent_tools(
+    _state: State<'_, SharedState>,
+) -> Result<Vec<AgentToolDescriptor>, String> {
+    // Legacy compatibility command. The frontend should prefer agent-service `/health`
+    // for live tool discovery and only use this bridge as a fallback surface.
+    list_live_agent_tools().map_err(|error| error.to_string())
 }
 
 #[tauri::command]

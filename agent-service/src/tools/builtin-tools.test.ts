@@ -51,9 +51,46 @@ function createArtifact(overrides: Partial<AgentArtifactDto> = {}): AgentArtifac
   };
 }
 
+function createDesktopBridgeClient() {
+  return {
+    listSavedParsers: vi.fn(async () => [
+      {
+        id: "parser-1",
+        name: "Saved Parser",
+        script: "function parse() { return {}; }",
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]),
+    loadTopicMessageSamples: vi.fn(async () => [
+      {
+        id: "sample-1",
+        topic: "factory/raw",
+        rawPayloadHex: "0102 03",
+        parsedPayloadJson: "{\"temperature\":25}",
+        parseError: null,
+        receivedAt: 123,
+      },
+    ]),
+    testParserScript: vi.fn(async () => ({
+      ok: true,
+      parsedPayloadJson: "{\"temperature\":25}",
+      parseError: null,
+    })),
+    saveParserDraft: vi.fn(async () => ({
+      id: "parser-2",
+      name: "Draft Parser",
+      script: "function parse() { return {}; }",
+      createdAt: 3,
+      updatedAt: 4,
+    })),
+  };
+}
+
 describe("registerBuiltinTools", () => {
   it("registers safe context tools and exposes helper metadata", async () => {
     const toolRegistry = new ToolRegistry();
+    const desktopBridgeClient = createDesktopBridgeClient();
     registerBuiltinTools({
       toolRegistry,
       capabilityRegistry: new CapabilityRegistry(),
@@ -63,6 +100,7 @@ describe("registerBuiltinTools", () => {
       artifactStore: {
         list: () => [createArtifact()],
       } as never,
+      desktopBridgeClient: desktopBridgeClient as never,
     });
 
     const toolRunner = new ToolRunner(toolRegistry);
@@ -96,6 +134,10 @@ describe("registerBuiltinTools", () => {
         "list_workspace_memories",
         "list_recent_parser_artifacts",
         "describe_parser_helpers",
+        "list_saved_parsers",
+        "load_topic_message_samples",
+        "test_parser_script",
+        "save_parser_draft",
       ]),
     );
     expect(helpersResult).toMatchObject({
@@ -121,10 +163,19 @@ describe("registerBuiltinTools", () => {
       },
     });
     expect(events).toEqual(["tool.request", "tool.result", "tool.request", "tool.result"]);
+    expect(toolRegistry.list().find((tool) => tool.id === "save_parser_draft")).toMatchObject({
+      toolKind: "mutation",
+      riskLevel: "medium",
+      allowedModes: ["execute"],
+      minSafetyLevel: "draft",
+      requiresApproval: true,
+      idempotent: false,
+    });
   });
 
   it("lists memories with filtering and limit support", async () => {
     const toolRegistry = new ToolRegistry();
+    const desktopBridgeClient = createDesktopBridgeClient();
     registerBuiltinTools({
       toolRegistry,
       capabilityRegistry: new CapabilityRegistry(),
@@ -142,6 +193,7 @@ describe("registerBuiltinTools", () => {
       artifactStore: {
         list: vi.fn(() => []),
       } as never,
+      desktopBridgeClient: desktopBridgeClient as never,
     });
 
     const result = await new ToolRunner(toolRegistry).execute(
@@ -159,6 +211,82 @@ describe("registerBuiltinTools", () => {
       output: {
         total: 1,
         items: [expect.objectContaining({ id: "memory-2", scopeRef: "factory/raw" })],
+      },
+    });
+  });
+
+  it("proxies parser library bridge tools for listing, testing, sampling, and saving", async () => {
+    const toolRegistry = new ToolRegistry();
+    const desktopBridgeClient = createDesktopBridgeClient();
+    registerBuiltinTools({
+      toolRegistry,
+      capabilityRegistry: new CapabilityRegistry(),
+      memoryStore: {
+        list: () => [],
+      } as never,
+      artifactStore: {
+        list: () => [],
+      } as never,
+      desktopBridgeClient: desktopBridgeClient as never,
+    });
+
+    const toolRunner = new ToolRunner(toolRegistry);
+    const eventBus = new TypedEventBus();
+
+    const parsersResult = await toolRunner.execute(
+      "list_saved_parsers",
+      { limit: 1 },
+      { sessionId: "session-1", runId: "run-1", eventBus },
+    );
+    const samplesResult = await toolRunner.execute(
+      "load_topic_message_samples",
+      { topic: "factory/raw", limit: 1 },
+      { sessionId: "session-1", runId: "run-1", eventBus },
+    );
+    const testResult = await toolRunner.execute(
+      "test_parser_script",
+      {
+        script: "function parse() { return {}; }",
+        payloadHex: "0102",
+        topic: "factory/raw",
+      },
+      { sessionId: "session-1", runId: "run-1", eventBus },
+    );
+    const saveResult = await toolRunner.execute(
+      "save_parser_draft",
+      {
+        name: "Draft Parser",
+        script: "function parse() { return {}; }",
+      },
+      { sessionId: "session-1", runId: "run-1", eventBus },
+    );
+
+    expect(parsersResult).toMatchObject({
+      ok: true,
+      output: {
+        total: 1,
+        items: [expect.objectContaining({ id: "parser-1", name: "Saved Parser" })],
+      },
+    });
+    expect(samplesResult).toMatchObject({
+      ok: true,
+      output: {
+        total: 1,
+        items: [expect.objectContaining({ id: "sample-1", topic: "factory/raw" })],
+      },
+    });
+    expect(testResult).toMatchObject({
+      ok: true,
+      output: {
+        ok: true,
+        parsedPayloadJson: "{\"temperature\":25}",
+      },
+    });
+    expect(saveResult).toMatchObject({
+      ok: true,
+      output: {
+        id: "parser-2",
+        name: "Draft Parser",
       },
     });
   });

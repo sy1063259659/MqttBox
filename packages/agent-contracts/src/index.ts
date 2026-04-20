@@ -28,10 +28,55 @@ export type MemoryScopeType = "global" | "connection" | "topicPattern" | "parser
 
 export interface AgentSessionDto {
   id: string;
+  createdAt: string;
+  updatedAt: string;
+  title: string;
+  lastMessagePreview?: string | null;
+  draftMode: AgentSessionMode;
+  draftSafetyLevel: AgentSafetyLevel;
+  workspaceId?: string | null;
+}
+
+export interface AgentThreadMessageDto {
+  id: string;
+  role: "system" | "user" | "assistant";
+  content: string;
   mode: AgentSessionMode;
   safetyLevel: AgentSafetyLevel;
   createdAt: string;
-  workspaceId?: string | null;
+  attachments: AgentAttachmentDto[];
+  runId?: string | null;
+  isStreaming?: boolean;
+}
+
+export interface ApprovalResolutionRecordDto {
+  requestId: string;
+  outcome: "approved" | "rejected" | "expired";
+  resolvedAt: string;
+  resolver?: string | null;
+}
+
+export interface AgentSessionContextSummaryDto {
+  content: string;
+  updatedAt: string;
+  sourceMessageCount: number;
+  compressedUntil?: string | null;
+}
+
+export interface AgentTimelineDto {
+  activeRunId: string | null;
+  runs: Array<AgentRunDto & { steps: ExecutionStepDto[] }>;
+  latestPlan: ExecutionPlanDto | null;
+}
+
+export interface AgentSessionDetailDto {
+  session: AgentSessionDto;
+  timeline: AgentTimelineDto;
+  messages: AgentThreadMessageDto[];
+  approvals: ApprovalRequestDto[];
+  approvalHistory: ApprovalResolutionRecordDto[];
+  artifacts: AgentArtifactDto[];
+  contextSummary?: AgentSessionContextSummaryDto | null;
 }
 
 export interface AgentRunDto {
@@ -168,6 +213,7 @@ export interface AgentServiceConfigDto {
     model: string;
     baseUrl: string;
     enabled: boolean;
+    protocol: "responses" | "chat_completions";
   };
   transport: {
     modes: string[];

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
+  AgentArtifactDto,
   AgentAttachmentDto,
   AgentEvent,
   AgentEventEnvelope,
@@ -7,6 +8,7 @@ import type {
   AgentEventType,
   AgentServiceConfigDto,
   AgentSafetyLevel,
+  AgentSessionDetailDto,
   AgentSessionDto,
   AgentSessionMode,
   ApprovalRequestDto,
@@ -32,6 +34,7 @@ import { ExecuteModeHandler } from "../modes/execute/index.js";
 import type { ModeHandler } from "../modes/types.js";
 import type { Logger } from "../observability/logger.js";
 import type { InMemorySessionStore } from "../persistence/session-store.js";
+import { packSessionContext } from "../persistence/session-context.js";
 import type { PolicyEngine } from "../policy/index.js";
 import type { PromptRegistry } from "../prompts/index.js";
 import type { RunScheduler } from "../scheduler/index.js";
@@ -56,6 +59,8 @@ export interface CreateSessionResult {
 export interface AppendSessionMessageInput {
   sessionId: string;
   message: string;
+  mode?: AgentSessionMode;
+  safetyLevel?: AgentSafetyLevel;
   attachments?: AgentAttachmentDto[];
   onEvent?: (event: AgentEvent) => void;
 }
@@ -74,6 +79,14 @@ export interface ResolveApprovalResult {
   requestId: string;
   outcome: "approved" | "rejected" | "expired";
   events: AgentEvent[];
+}
+
+export interface SessionListResult {
+  sessions: AgentSessionDto[];
+}
+
+export interface SessionDetailResult {
+  detail: AgentSessionDetailDto;
 }
 
 export interface AgentHarnessDeps {
@@ -105,18 +118,39 @@ export class AgentHarness {
   private unsubscribeTransport?: () => void;
   private readonly pendingApprovals = new Map<
     string,
-    {
-      session: AgentSessionDto;
-      runId: string;
-      request: ApprovalRequestDto;
-      threadId: string;
-      message: string;
-      attachments: AgentAttachmentDto[];
-      suggestedTopicFilter: string;
-      userMessageId: string;
-      capabilityId: string;
-      startedAt: string;
-    }
+    | {
+        kind: "artifact_capture";
+        session: AgentSessionDto;
+        runId: string;
+        request: ApprovalRequestDto;
+        threadId: string;
+        message: string;
+        mode: AgentSessionMode;
+        safetyLevel: AgentSafetyLevel;
+        attachments: AgentAttachmentDto[];
+        suggestedTopicFilter: string;
+        userMessageId: string;
+        capabilityId: string;
+        startedAt: string;
+      }
+    | {
+        kind: "save_parser_draft";
+        session: AgentSessionDto;
+        runId: string;
+        request: ApprovalRequestDto;
+        userMessageId: string;
+        capabilityId: string;
+        startedAt: string;
+        message: string;
+        mode: AgentSessionMode;
+        safetyLevel: AgentSafetyLevel;
+        artifact: AgentArtifactDto;
+        saveInput: {
+          id?: string;
+          name: string;
+          script: string;
+        };
+      }
   >();
 
   constructor(private readonly deps: AgentHarnessDeps) {
@@ -225,7 +259,8 @@ export class AgentHarness {
         );
       }
 
-      const session = this.deps.sessionStore.create(mode, safetyLevel);
+      const detail = this.deps.sessionStore.create(mode, safetyLevel);
+      const session = detail.session;
       this.deps.scheduler.schedule({
         id: `session-${session.id}`,
         sessionId: session.id,
@@ -249,6 +284,17 @@ export class AgentHarness {
     return this.deps.sessionStore.getById(sessionId);
   }
 
+  listSessions(): SessionListResult {
+    return {
+      sessions: this.deps.sessionStore.list(),
+    };
+  }
+
+  getSessionDetail(sessionId: string): SessionDetailResult | null {
+    const detail = this.deps.sessionStore.getDetail(sessionId);
+    return detail ? { detail } : null;
+  }
+
   async appendSessionMessage(input: AppendSessionMessageInput): Promise<AppendSessionMessageResult> {
     return this.captureMessageEvents(async () => {
       const session = this.deps.sessionStore.getById(input.sessionId);
@@ -259,36 +305,45 @@ export class AgentHarness {
         throw new Error(`Budget check failed for session: ${session.id}`);
       }
 
+      const mode = input.mode ?? session.draftMode;
+      const safetyLevel = input.safetyLevel ?? session.draftSafetyLevel;
+      this.deps.sessionStore.updateDraftPreferences(session.id, mode, safetyLevel);
+
       const userMessageId = randomUUID();
-      const capabilityMatch = await this.deps.capabilityRegistry.resolveWithFallback(
-        session.mode,
-        input.message,
-      );
+      const capabilityMatch = await this.deps.capabilityRegistry.resolveWithFallback(mode, input.message);
       const capability = capabilityMatch.capability;
+      const sessionDetail = this.deps.sessionStore.getDetail(session.id);
+      const packedContext = sessionDetail
+        ? packSessionContext(sessionDetail, input.message)
+        : { packedText: input.message, usedSummary: false };
       this.deps.logger.info("message accepted", {
         sessionId: session.id,
-        mode: session.mode,
-        safetyLevel: session.safetyLevel,
+        mode,
+        safetyLevel,
         capabilityId: capability.id,
         capabilityConfidence: capabilityMatch.confidence,
         capabilityReason: capabilityMatch.matchReason,
+        contextCompressed: packedContext.usedSummary,
       });
       this.emitEvent("session.message", session.id, null, {
         messageId: userMessageId,
         role: "user",
         content: input.message,
-        mode: session.mode,
-        safetyLevel: session.safetyLevel,
+        mode,
+        safetyLevel,
         attachments: input.attachments ?? [],
       });
 
       const assistantMessageId = randomUUID();
       let streamedContent = "";
       try {
-        if (session.mode === "execute") {
+        if (mode === "execute") {
           return this.handleExecuteMode(
             session,
+            mode,
+            safetyLevel,
             input.message,
+            packedContext.packedText,
             input.attachments ?? [],
             userMessageId,
             capability.id,
@@ -298,6 +353,7 @@ export class AgentHarness {
         const response = await this.modeHandlers.chat.respond({
           session,
           message: input.message,
+          modelMessage: packedContext.packedText,
           attachments: input.attachments ?? [],
           capabilityId: capability.id,
           eventBus: this.deps.eventBus,
@@ -343,7 +399,10 @@ export class AgentHarness {
 
   private async handleExecuteMode(
     session: AgentSessionDto,
+    mode: AgentSessionMode,
+    safetyLevel: AgentSafetyLevel,
     message: string,
+    modelMessage: string,
     attachments: AgentAttachmentDto[],
     userMessageId: string,
     capabilityId: string,
@@ -358,6 +417,8 @@ export class AgentHarness {
         runId,
         goal: message,
         capabilityId,
+        mode,
+        safetyLevel,
         status: "planning",
         startedAt,
       }),
@@ -365,8 +426,8 @@ export class AgentHarness {
     this.deps.logger.info("run started", {
       sessionId: session.id,
       runId,
-      mode: session.mode,
-      safetyLevel: session.safetyLevel,
+      mode,
+      safetyLevel,
       capabilityId,
     });
 
@@ -398,14 +459,17 @@ export class AgentHarness {
       });
     }
 
-    return this.completeParserAuthoring({
-      session,
-      runId,
-      userMessageId,
-      message,
-      attachments,
-      suggestedTopicFilter,
-      capabilityId,
+      return this.completeParserAuthoring({
+        session,
+        mode,
+        safetyLevel,
+        runId,
+        userMessageId,
+        message,
+        modelMessage,
+        attachments,
+        suggestedTopicFilter,
+        capabilityId,
       startedAt,
       resumeThreadId: null,
     });
@@ -459,41 +523,127 @@ export class AgentHarness {
         resolver: "frontend-shell",
       });
 
-      if (outcome === "approved") {
-        await this.completeParserAuthoring({
-          session: pending.session,
-          runId: pending.runId,
-          userMessageId: pending.userMessageId,
-          message: pending.message,
-          attachments: pending.attachments,
-          suggestedTopicFilter: pending.suggestedTopicFilter,
-          capabilityId: pending.capabilityId,
-          startedAt: pending.startedAt,
-          resumeThreadId: pending.threadId,
-        });
+      if (pending.kind === "artifact_capture") {
+        if (outcome === "approved") {
+          await this.completeParserAuthoring({
+            session: pending.session,
+            mode: pending.mode,
+            safetyLevel: pending.safetyLevel,
+            runId: pending.runId,
+            userMessageId: pending.userMessageId,
+            message: pending.message,
+            modelMessage: pending.message,
+            attachments: pending.attachments,
+            suggestedTopicFilter: pending.suggestedTopicFilter,
+            capabilityId: pending.capabilityId,
+            startedAt: pending.startedAt,
+            resumeThreadId: pending.threadId,
+          });
+        } else {
+          const assistantMessageId = randomUUID();
+          const content =
+            outcome === "rejected"
+              ? "Parser draft creation was rejected."
+              : "Parser draft approval expired.";
+          this.emitEvent("assistant.final", sessionId, pending.runId, {
+            messageId: assistantMessageId,
+            content,
+            finishReason: "error",
+          });
+          const completedAt = new Date().toISOString();
+          this.emitEvent("run.completed", sessionId, pending.runId, {
+            run: this.parserAuthoringHandler.createRun({
+              session: pending.session,
+              runId: pending.runId,
+              goal: pending.message,
+              capabilityId: pending.capabilityId,
+              mode: pending.mode,
+              safetyLevel: pending.safetyLevel,
+              status: "failed",
+              startedAt: pending.startedAt,
+              completedAt,
+            }),
+            finishReason: "error",
+          });
+        }
+      } else if (outcome === "approved") {
+        const saveResult = await this.deps.toolRunner.execute(
+          "save_parser_draft",
+          pending.saveInput,
+          {
+            sessionId,
+            runId: pending.runId,
+            eventBus: this.deps.eventBus,
+          },
+        );
+
+        if (!saveResult.ok) {
+          const errorMessage =
+            saveResult.error ?? "Failed to save parser draft to the local library.";
+          this.emitServiceError(sessionId, pending.runId, new Error(errorMessage));
+          this.emitEvent("assistant.final", sessionId, pending.runId, {
+            messageId: randomUUID(),
+            content: errorMessage,
+            finishReason: "error",
+          });
+          this.emitEvent("run.completed", sessionId, pending.runId, {
+            run: this.parserAuthoringHandler.createRun({
+              session: pending.session,
+              runId: pending.runId,
+              goal: pending.message,
+              capabilityId: pending.capabilityId,
+              mode: pending.mode,
+              safetyLevel: pending.safetyLevel,
+              status: "failed",
+              startedAt: pending.startedAt,
+              completedAt: new Date().toISOString(),
+            }),
+            finishReason: "error",
+          });
+        } else {
+          this.emitEvent("assistant.final", sessionId, pending.runId, {
+            messageId: randomUUID(),
+            content: `Saved parser draft "${pending.saveInput.name}" to the local Parser Library.`,
+            finishReason: "stop",
+          });
+          this.emitEvent("run.completed", sessionId, pending.runId, {
+            run: this.parserAuthoringHandler.createRun({
+              session: pending.session,
+              runId: pending.runId,
+              goal: pending.message,
+              capabilityId: pending.capabilityId,
+              mode: pending.mode,
+              safetyLevel: pending.safetyLevel,
+              status: "completed",
+              startedAt: pending.startedAt,
+              completedAt: new Date().toISOString(),
+            }),
+            finishReason: "stop",
+          });
+        }
       } else {
-        const assistantMessageId = randomUUID();
         const content =
           outcome === "rejected"
-            ? "Parser draft creation was rejected."
-            : "Parser draft approval expired.";
+            ? "Parser draft was generated but not saved to the local Parser Library."
+            : "Parser draft save approval expired before the draft was saved.";
         this.emitEvent("assistant.final", sessionId, pending.runId, {
-          messageId: assistantMessageId,
+          messageId: randomUUID(),
           content,
-          finishReason: "error",
+          finishReason: "stop",
         });
-        const completedAt = new Date().toISOString();
         this.emitEvent("run.completed", sessionId, pending.runId, {
           run: this.parserAuthoringHandler.createRun({
             session: pending.session,
             runId: pending.runId,
             goal: pending.message,
             capabilityId: pending.capabilityId,
-            status: "failed",
+            mode: pending.mode,
+            safetyLevel: pending.safetyLevel,
+            status: "completed",
             startedAt: pending.startedAt,
-            completedAt,
+            completedAt: new Date().toISOString(),
           }),
-          finishReason: "error",
+          finishReason: "stop",
         });
       }
 
@@ -508,9 +658,12 @@ export class AgentHarness {
 
   private async completeParserAuthoring(input: {
     session: AgentSessionDto;
+    mode: AgentSessionMode;
+    safetyLevel: AgentSafetyLevel;
     runId: string;
     userMessageId: string;
     message: string;
+    modelMessage: string;
     attachments: AgentAttachmentDto[];
     suggestedTopicFilter: string;
     capabilityId: string;
@@ -540,10 +693,10 @@ export class AgentHarness {
           runId: input.runId,
           threadId: input.resumeThreadId,
           systemPrompt: this.deps.promptRegistry.getSystemPrompt("execute", input.capabilityId),
-          userMessage: input.message,
+          userMessage: input.modelMessage,
           attachments: input.attachments,
           capabilityId: input.capabilityId,
-          safetyLevel: input.session.safetyLevel,
+          safetyLevel: input.safetyLevel,
           suggestedTopicFilter: input.suggestedTopicFilter,
           eventBus: this.deps.eventBus,
           toolRunner: this.deps.toolRunner,
@@ -561,6 +714,7 @@ export class AgentHarness {
         executeResult = await this.modeHandlers.execute.respond({
           session: input.session,
           message: input.message,
+          modelMessage: input.modelMessage,
           attachments: input.attachments,
           capabilityId: input.capabilityId,
           runId: input.runId,
@@ -587,16 +741,19 @@ export class AgentHarness {
         input.runId,
         input.suggestedTopicFilter,
         input.message,
-        input.session.safetyLevel,
+        input.safetyLevel,
         executeResult.approvalInterrupt.toolArgs,
         executeResult.approvalInterrupt.description,
       );
       this.pendingApprovals.set(request.id, {
+        kind: "artifact_capture",
         session: input.session,
         runId: input.runId,
         request,
         threadId: executeResult.approvalInterrupt.threadId,
         message: input.message,
+        mode: input.mode,
+        safetyLevel: input.safetyLevel,
         attachments: input.attachments,
         suggestedTopicFilter: input.suggestedTopicFilter,
         userMessageId: input.userMessageId,
@@ -646,9 +803,59 @@ export class AgentHarness {
       return this.finishParserAuthoringRun(input, assistantMessageId, assistantContent, modelFailed);
     }
 
-    const artifact = this.deps.artifactStore.save(normalizedArtifact.artifact);
+    const artifact = this.deps.artifactStore.save(
+      await this.runParserDraftSmokeTest(input, normalizedArtifact.artifact),
+    );
     this.emitEvent("artifact.ready", input.session.id, input.runId, { artifact });
     assistantContent = this.normalizeAssistantText(executeResult.assistantText, artifact.summary);
+
+    if (this.parserAuthoringHandler.shouldRequestSave(input.message)) {
+      const saveInput = this.createParserSaveInput(artifact);
+      const existingParserId =
+        /\b(overwrite|replace|update)\b|覆盖|替换|更新/.test(input.message.toLowerCase())
+          ? await this.findExistingParserIdByName(saveInput.name, input)
+          : null;
+      const request = this.parserAuthoringHandler.createSaveApprovalRequest({
+        runId: input.runId,
+        request: input.message,
+        safetyLevel: input.safetyLevel,
+        artifact,
+        existingParserId,
+      });
+      const nextSaveInput = existingParserId ? { ...saveInput, id: existingParserId } : saveInput;
+      this.pendingApprovals.set(request.id, {
+        kind: "save_parser_draft",
+        session: input.session,
+        runId: input.runId,
+        request,
+        userMessageId: input.userMessageId,
+        capabilityId: input.capabilityId,
+        startedAt: input.startedAt,
+        message: input.message,
+        mode: input.mode,
+        safetyLevel: input.safetyLevel,
+        artifact,
+        saveInput: nextSaveInput,
+      });
+      this.emitEvent("run.status", input.session.id, input.runId, {
+        runId: input.runId,
+        status: "awaiting_approval",
+        message: "Waiting for approval to save the parser draft to the local library",
+      });
+      this.emitEvent("approval.requested", input.session.id, input.runId, { request });
+      this.emitEvent("assistant.final", input.session.id, input.runId, {
+        messageId: assistantMessageId,
+        content: "Parser draft is ready and awaiting approval before it is saved to the local Parser Library.",
+        finishReason: "stop",
+      });
+      return {
+        session: input.session,
+        userMessageId: input.userMessageId,
+        assistantMessageId,
+        assistantContent:
+          "Parser draft is ready and awaiting approval before it is saved to the local Parser Library.",
+      };
+    }
 
     return this.finishParserAuthoringRun(input, assistantMessageId, assistantContent, modelFailed);
   }
@@ -656,9 +863,12 @@ export class AgentHarness {
   private finishParserAuthoringRun(
     input: {
       session: AgentSessionDto;
+      mode: AgentSessionMode;
+      safetyLevel: AgentSafetyLevel;
       runId: string;
       userMessageId: string;
       message: string;
+      modelMessage: string;
       attachments: AgentAttachmentDto[];
       suggestedTopicFilter: string;
       capabilityId: string;
@@ -677,7 +887,7 @@ export class AgentHarness {
       sessionId: input.session.id,
       runId: input.runId,
       capabilityId: input.capabilityId,
-      safetyLevel: input.session.safetyLevel,
+      safetyLevel: input.safetyLevel,
       finishReason: modelFailed ? "error" : "stop",
     });
     const completedAt = new Date().toISOString();
@@ -687,6 +897,8 @@ export class AgentHarness {
         runId: input.runId,
         goal: input.message,
         capabilityId: input.capabilityId,
+        mode: input.mode,
+        safetyLevel: input.safetyLevel,
         status: modelFailed ? "failed" : "completed",
         startedAt: input.startedAt,
         completedAt,
@@ -705,6 +917,200 @@ export class AgentHarness {
   private normalizeAssistantText(assistantText: string, fallbackSummary?: string) {
     const trimmed = assistantText.trim();
     return trimmed || fallbackSummary || "Parser draft created and ready for review.";
+  }
+
+  private async runParserDraftSmokeTest(
+    input: {
+      session: AgentSessionDto;
+      runId: string;
+      message: string;
+      suggestedTopicFilter: string;
+    },
+    artifact: AgentArtifactDto,
+  ): Promise<AgentArtifactDto> {
+    if (!this.deps.toolRegistry.get("test_parser_script")) {
+      return artifact;
+    }
+
+    const saveInput = this.createParserSaveInput(artifact);
+    const payloadHex =
+      this.readArtifactEditorString(artifact, "suggestedTestPayloadHex") ??
+      (await this.findSamplePayloadHex(input));
+
+    if (!payloadHex) {
+      return artifact;
+    }
+
+    const result = await this.deps.toolRunner.execute(
+      "test_parser_script",
+      {
+        script: saveInput.script,
+        payloadHex,
+        topic: input.suggestedTopicFilter,
+      },
+      {
+        sessionId: input.session.id,
+        runId: input.runId,
+        eventBus: this.deps.eventBus,
+      },
+    );
+
+    if (!result.ok || !result.output || typeof result.output !== "object") {
+      return artifact;
+    }
+
+    const output = result.output as {
+      ok?: boolean;
+      parsedPayloadJson?: string | null;
+      parseError?: string | null;
+    };
+    const payload = (artifact.payload ?? {}) as Record<string, unknown>;
+    const reviewPayload =
+      typeof payload.reviewPayload === "object" && payload.reviewPayload !== null
+        ? ({ ...(payload.reviewPayload as Record<string, unknown>) } as Record<string, unknown>)
+        : {};
+    const risks = Array.isArray(reviewPayload.risks)
+      ? (reviewPayload.risks as string[]).filter((item) => typeof item === "string" && item.trim().length > 0)
+      : [];
+
+    if (output.ok) {
+      reviewPayload.summary =
+        typeof reviewPayload.summary === "string" && reviewPayload.summary.trim().length > 0
+          ? `${reviewPayload.summary} Smoke test passed against ${payloadHex}.`
+          : `Smoke test passed against ${payloadHex}.`;
+      reviewPayload.testResult = {
+        ok: true,
+        payloadHex,
+        parsedPayloadJson: output.parsedPayloadJson ?? null,
+        parseError: null,
+      };
+    } else {
+      const parseError = output.parseError ?? "Parser smoke test failed.";
+      reviewPayload.summary =
+        typeof reviewPayload.summary === "string" && reviewPayload.summary.trim().length > 0
+          ? `${reviewPayload.summary} Smoke test currently fails: ${parseError}`
+          : `Smoke test currently fails: ${parseError}`;
+      reviewPayload.testResult = {
+        ok: false,
+        payloadHex,
+        parsedPayloadJson: output.parsedPayloadJson ?? null,
+        parseError,
+      };
+      if (!risks.some((risk) => risk === parseError)) {
+        risks.unshift(parseError);
+      }
+      reviewPayload.risks = risks.slice(0, 3);
+    }
+
+    return {
+      ...artifact,
+      payload: {
+        ...payload,
+        reviewPayload,
+      },
+    };
+  }
+
+  private async findSamplePayloadHex(input: {
+    session: AgentSessionDto;
+    runId: string;
+    suggestedTopicFilter: string;
+  }): Promise<string | null> {
+    if (!this.deps.toolRegistry.get("load_topic_message_samples")) {
+      return null;
+    }
+
+    const result = await this.deps.toolRunner.execute(
+      "load_topic_message_samples",
+      {
+        topic: input.suggestedTopicFilter,
+        limit: 1,
+      },
+      {
+        sessionId: input.session.id,
+        runId: input.runId,
+        eventBus: this.deps.eventBus,
+      },
+    );
+
+    if (!result.ok || !result.output || typeof result.output !== "object") {
+      return null;
+    }
+
+    const items = Array.isArray((result.output as Record<string, unknown>).items)
+      ? ((result.output as Record<string, unknown>).items as Array<Record<string, unknown>>)
+      : [];
+    const sample = items.find(
+      (item) => typeof item.rawPayloadHex === "string" && item.rawPayloadHex.trim().length > 0,
+    );
+    return typeof sample?.rawPayloadHex === "string" ? sample.rawPayloadHex : null;
+  }
+
+  private async findExistingParserIdByName(
+    parserName: string,
+    input: {
+      session: AgentSessionDto;
+      runId: string;
+    },
+  ): Promise<string | null> {
+    if (!this.deps.toolRegistry.get("list_saved_parsers")) {
+      return null;
+    }
+
+    const result = await this.deps.toolRunner.execute(
+      "list_saved_parsers",
+      {
+        limit: 20,
+      },
+      {
+        sessionId: input.session.id,
+        runId: input.runId,
+        eventBus: this.deps.eventBus,
+      },
+    );
+
+    if (!result.ok || !result.output || typeof result.output !== "object") {
+      return null;
+    }
+
+    const items = Array.isArray((result.output as Record<string, unknown>).items)
+      ? ((result.output as Record<string, unknown>).items as Array<Record<string, unknown>>)
+      : [];
+    const match = items.find(
+      (item) =>
+        typeof item.name === "string" &&
+        item.name.trim().toLowerCase() === parserName.trim().toLowerCase() &&
+        typeof item.id === "string" &&
+        item.id.trim().length > 0,
+    );
+
+    return typeof match?.id === "string" ? match.id : null;
+  }
+
+  private createParserSaveInput(artifact: AgentArtifactDto) {
+    const name = this.readArtifactEditorString(artifact, "name") ?? artifact.title;
+    const script = this.readArtifactEditorString(artifact, "script") ?? "";
+    return {
+      name,
+      script,
+    };
+  }
+
+  private readArtifactEditorString(
+    artifact: AgentArtifactDto,
+    key: string,
+  ): string | null {
+    if (!artifact.payload || typeof artifact.payload !== "object") {
+      return null;
+    }
+
+    const payload = artifact.payload as Record<string, unknown>;
+    if (!payload.editorPayload || typeof payload.editorPayload !== "object") {
+      return null;
+    }
+
+    const value = (payload.editorPayload as Record<string, unknown>)[key];
+    return typeof value === "string" && value.trim().length > 0 ? value : null;
   }
 
   private async captureApprovalEvents(
@@ -754,6 +1160,7 @@ export class AgentHarness {
       payload,
     } as AgentEventEnvelope<TType> as AgentEvent;
 
+    this.deps.sessionStore.applyEvent(event);
     this.deps.eventBus.publish(event);
   }
 

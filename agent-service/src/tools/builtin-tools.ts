@@ -4,6 +4,7 @@ import type { MemoryStore } from "../memory/index.js";
 import { listParserHelpers, PARSER_HELPER_USAGE_NOTE } from "./parser-helpers.js";
 import type { ToolDefinition } from "./types.js";
 import type { ToolRegistry } from "./registry.js";
+import type { DesktopBridgeClient } from "../integrations/desktop-bridge-client.js";
 import { z } from "zod";
 
 const emptyObjectSchema = z.object({});
@@ -42,6 +43,18 @@ const listArtifactsJsonSchema = {
   additionalProperties: false,
 } satisfies Record<string, unknown>;
 
+const listSavedParsersInputSchema = z.object({
+  limit: z.number().int().min(1).max(20).optional(),
+});
+
+const listSavedParsersJsonSchema = {
+  type: "object",
+  properties: {
+    limit: { type: "integer", minimum: 1, maximum: 20 },
+  },
+  additionalProperties: false,
+} satisfies Record<string, unknown>;
+
 const describeHelpersInputSchema = z.object({
   names: z.array(z.string().min(1)).max(20).optional(),
 });
@@ -58,11 +71,62 @@ const describeHelpersJsonSchema = {
   additionalProperties: false,
 } satisfies Record<string, unknown>;
 
+const loadTopicMessageSamplesInputSchema = z.object({
+  topic: z.string().min(1).optional(),
+  connectionId: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(20).optional(),
+});
+
+const loadTopicMessageSamplesJsonSchema = {
+  type: "object",
+  properties: {
+    topic: { type: "string" },
+    connectionId: { type: "string" },
+    limit: { type: "integer", minimum: 1, maximum: 20 },
+  },
+  additionalProperties: false,
+} satisfies Record<string, unknown>;
+
+const testParserScriptInputSchema = z.object({
+  script: z.string().min(1),
+  payloadHex: z.string().min(1),
+  topic: z.string().min(1).optional(),
+});
+
+const testParserScriptJsonSchema = {
+  type: "object",
+  properties: {
+    script: { type: "string" },
+    payloadHex: { type: "string" },
+    topic: { type: "string" },
+  },
+  required: ["script", "payloadHex"],
+  additionalProperties: false,
+} satisfies Record<string, unknown>;
+
+const saveParserDraftInputSchema = z.object({
+  id: z.string().min(1).optional(),
+  name: z.string().min(1),
+  script: z.string().min(1),
+});
+
+const saveParserDraftJsonSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    script: { type: "string" },
+  },
+  required: ["name", "script"],
+  additionalProperties: false,
+} satisfies Record<string, unknown>;
+
 interface RegisterBuiltinToolsInput {
   toolRegistry: ToolRegistry;
   capabilityRegistry: CapabilityRegistry;
   memoryStore: MemoryStore;
   artifactStore: ArtifactStore;
+  desktopBridgeClient: DesktopBridgeClient;
 }
 
 export function registerBuiltinTools(input: RegisterBuiltinToolsInput): void {
@@ -169,6 +233,78 @@ export function registerBuiltinTools(input: RegisterBuiltinToolsInput): void {
             note: PARSER_HELPER_USAGE_NOTE,
             helpers: listParserHelpers(parsed.names),
           },
+        };
+      },
+    },
+    {
+      name: "list_saved_parsers",
+      description: "List saved message parsers from the local Parser Library so the agent can reuse or avoid duplicating existing drafts.",
+      inputSchema: listSavedParsersJsonSchema,
+      runtimeSchema: listSavedParsersInputSchema,
+      handler: async (rawInput) => {
+        const parsed = listSavedParsersInputSchema.parse(rawInput ?? {});
+        const items = await input.desktopBridgeClient.listSavedParsers(parsed.limit);
+        return {
+          ok: true,
+          output: {
+            items,
+            total: items.length,
+          },
+        };
+      },
+    },
+    {
+      name: "load_topic_message_samples",
+      description: "Load recent topic message samples from the desktop app so parser drafts can be grounded in real payloads.",
+      inputSchema: loadTopicMessageSamplesJsonSchema,
+      runtimeSchema: loadTopicMessageSamplesInputSchema,
+      handler: async (rawInput) => {
+        const parsed = loadTopicMessageSamplesInputSchema.parse(rawInput ?? {});
+        const items = await input.desktopBridgeClient.loadTopicMessageSamples({
+          topic: parsed.topic,
+          connectionId: parsed.connectionId,
+          limit: parsed.limit,
+        });
+        return {
+          ok: true,
+          output: {
+            items,
+            total: items.length,
+          },
+        };
+      },
+    },
+    {
+      name: "test_parser_script",
+      description: "Run a parser script against a sample hex payload using the desktop parser runtime and return parsed JSON or parse errors.",
+      inputSchema: testParserScriptJsonSchema,
+      runtimeSchema: testParserScriptInputSchema,
+      handler: async (rawInput) => {
+        const parsed = testParserScriptInputSchema.parse(rawInput ?? {});
+        const result = await input.desktopBridgeClient.testParserScript(parsed);
+        return {
+          ok: true,
+          output: result,
+        };
+      },
+    },
+    {
+      name: "save_parser_draft",
+      description: "Save a parser draft into the local Parser Library after explicit user approval.",
+      inputSchema: saveParserDraftJsonSchema,
+      runtimeSchema: saveParserDraftInputSchema,
+      toolKind: "mutation",
+      riskLevel: "medium",
+      allowedModes: ["execute"],
+      minSafetyLevel: "draft",
+      requiresApproval: true,
+      idempotent: false,
+      handler: async (rawInput) => {
+        const parsed = saveParserDraftInputSchema.parse(rawInput ?? {});
+        const parser = await input.desktopBridgeClient.saveParserDraft(parsed);
+        return {
+          ok: true,
+          output: parser,
         };
       },
     },

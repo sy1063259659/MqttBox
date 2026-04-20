@@ -15,6 +15,8 @@ import type {
   AgentContextDto,
   AgentHarnessState,
   AgentIncomingEvent,
+  AgentSessionDetail,
+  AgentSessionSummary,
   AgentThreadMessage,
   AgentTimelineRun,
   AgentToolDescriptor,
@@ -25,10 +27,12 @@ import {
   createAgentSession,
   getAgentServiceConfig,
   getAgentServiceHealth,
+  getAgentSessionDetail,
+  listAgentSessions,
   resolveAgentApproval,
   streamAgentMessage,
 } from "@/services/agent-service";
-import { getAgentContext, listAgentTools } from "@/services/tauri";
+import { getAgentContext } from "@/services/tauri";
 
 type PendingAssistantPhase =
   | "sending"
@@ -66,6 +70,11 @@ interface AgentStore extends AgentHarnessState {
   loadContext: (connectionId?: string | null) => Promise<void>;
   loadServiceHealth: () => Promise<void>;
   loadServiceConfig: () => Promise<void>;
+  loadSessions: () => Promise<void>;
+  loadSessionDetail: (sessionId: string) => Promise<void>;
+  initializeSessionState: () => Promise<void>;
+  createNewSession: () => Promise<void>;
+  setActiveSession: (sessionId: string) => Promise<void>;
   setMode: (mode: AgentSessionMode) => void;
   setSafetyLevel: (safetyLevel: AgentSafetyLevel) => void;
   setDraftPrompt: (prompt: string) => void;
@@ -144,6 +153,28 @@ function upsertRun(runs: AgentTimelineRun[], nextRun: AgentTimelineRun) {
   return next;
 }
 
+function upsertApproval(approvals: ApprovalRequestDto[], request: ApprovalRequestDto) {
+  const index = approvals.findIndex((item) => item.id === request.id);
+  if (index < 0) {
+    return [request, ...approvals];
+  }
+
+  const next = [...approvals];
+  next[index] = request;
+  return next;
+}
+
+function upsertArtifact(artifacts: AgentStore["artifacts"], artifact: AgentStore["artifacts"][number]) {
+  const index = artifacts.findIndex((item) => item.id === artifact.id);
+  if (index < 0) {
+    return [artifact, ...artifacts];
+  }
+
+  const next = [...artifacts];
+  next[index] = artifact;
+  return next;
+}
+
 function mapStatusToRunState(status: RunStatus): AgentStore["runStatus"] {
   return status;
 }
@@ -168,20 +199,107 @@ function getPendingPhaseFromRunStatus(status: RunStatus): PendingAssistantPhase 
   return null;
 }
 
-function resetRuntimeState() {
+function emptyDetail(summary: AgentSessionSummary): AgentSessionDetail {
   return {
-    session: null,
-    timeline: FALLBACK_TIMELINE,
+    session: summary,
+    timeline: {
+      ...FALLBACK_TIMELINE,
+    },
     messages: [],
     approvals: [],
     approvalHistory: [],
     artifacts: [],
-    runStatus: FALLBACK_RUN_STATUS,
-    transportFlavor: "unknown" as const,
-    statusMessage: null,
-    isSubmitting: false,
-    pendingAssistantState: null,
-    activePhaseSummary: null,
+    contextSummary: null,
+  };
+}
+
+function mirrorFromDetail(detail: AgentSessionDetail | null, state: Pick<AgentStore, "mode" | "safetyLevel">) {
+  return {
+    session: detail?.session ?? null,
+    timeline: detail?.timeline ?? { ...FALLBACK_TIMELINE },
+    messages: detail?.messages ?? [],
+    approvals: detail?.approvals ?? [],
+    approvalHistory: detail?.approvalHistory ?? [],
+    artifacts: detail?.artifacts ?? [],
+    contextSummary: detail?.contextSummary ?? null,
+    mode: detail?.session.draftMode ?? state.mode,
+    safetyLevel: detail?.session.draftSafetyLevel ?? state.safetyLevel,
+  };
+}
+
+function syncSummary(
+  summaries: AgentSessionSummary[],
+  session: AgentSessionSummary,
+): AgentSessionSummary[] {
+  const next = [...summaries];
+  const index = next.findIndex((item) => item.id === session.id);
+  if (index < 0) {
+    next.unshift(session);
+  } else {
+    next[index] = session;
+  }
+
+  return next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+function buildDetailFromState(state: AgentStore, session: AgentSessionSummary): AgentSessionDetail {
+  return {
+    session,
+    timeline: state.timeline,
+    messages: state.messages,
+    approvals: state.approvals,
+    approvalHistory: state.approvalHistory,
+    artifacts: state.artifacts,
+    contextSummary: state.contextSummary,
+  };
+}
+
+function syncActiveSessionDraft(
+  state: AgentStore,
+  updates: Partial<Pick<AgentSessionSummary, "draftMode" | "draftSafetyLevel" | "updatedAt">>,
+) {
+  const activeSessionId = state.activeSessionId;
+  if (!activeSessionId) {
+    return {
+      session: state.session,
+      sessionSummaries: state.sessionSummaries,
+      sessionDetailsById: state.sessionDetailsById,
+    };
+  }
+
+  const baseSession =
+    state.sessionDetailsById[activeSessionId]?.session ??
+    state.session ??
+    state.sessionSummaries.find((item) => item.id === activeSessionId) ??
+    null;
+
+  if (!baseSession) {
+    return {
+      session: state.session,
+      sessionSummaries: state.sessionSummaries,
+      sessionDetailsById: state.sessionDetailsById,
+    };
+  }
+
+  const nextSession = {
+    ...baseSession,
+    ...updates,
+  };
+  const nextDetails = { ...state.sessionDetailsById };
+  const existingDetail = nextDetails[activeSessionId];
+  nextDetails[activeSessionId] = existingDetail
+    ? {
+        ...existingDetail,
+        session: nextSession,
+      }
+    : state.activeSessionId === activeSessionId
+      ? buildDetailFromState(state, nextSession)
+      : emptyDetail(nextSession);
+
+  return {
+    session: state.activeSessionId === activeSessionId ? nextSession : state.session,
+    sessionSummaries: syncSummary(state.sessionSummaries, nextSession),
+    sessionDetailsById: nextDetails,
   };
 }
 
@@ -203,6 +321,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   tools: [],
   context: null,
   session: null,
+  activeSessionId: null,
+  sessionSummaries: [],
+  sessionDetailsById: {},
   mode: FALLBACK_MODE,
   safetyLevel: FALLBACK_SAFETY,
   timeline: {
@@ -213,6 +334,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   approvals: [],
   approvalHistory: [],
   artifacts: [],
+  contextSummary: null,
   serviceConfig: null,
   capabilities: [],
   transportFlavor: "unknown",
@@ -223,22 +345,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   pendingAssistantState: null,
   activePhaseSummary: null,
   async loadTools() {
-    try {
-      const tools = await listAgentTools();
-      set({ tools });
-    } catch (error) {
-      set({
-        statusMessage: error instanceof Error ? error.message : "Failed to load tools",
-      });
-    }
+    await get().loadServiceHealth();
   },
   async loadContext(connectionId) {
     try {
       const context = await getAgentContext(connectionId ?? undefined);
-      set((state) => ({
+      set({
         context,
-        tools: state.tools.length > 0 ? state.tools : context.availableTools,
-      }));
+      });
     } catch (error) {
       set({
         context: null,
@@ -251,6 +365,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const health = await getAgentServiceHealth();
       set({
         capabilities: health.capabilities,
+        tools: health.tools,
         statusMessage: !health.model?.enabled
           ? "Agent model is disabled"
           : !health.model?.configured
@@ -260,6 +375,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     } catch (error) {
       set({
         capabilities: [],
+        tools: [],
         statusMessage: error instanceof Error ? error.message : "Agent service is unreachable",
       });
     }
@@ -275,31 +391,134 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       });
     }
   },
-  setMode(mode) {
+  async loadSessions() {
+    try {
+      const result = await listAgentSessions();
+      set((state) => {
+        const nextDetails = { ...state.sessionDetailsById };
+        for (const session of result.sessions) {
+          nextDetails[session.id] = nextDetails[session.id]
+            ? {
+                ...nextDetails[session.id],
+                session,
+              }
+            : emptyDetail(session);
+        }
+
+        return {
+          sessionSummaries: result.sessions,
+          sessionDetailsById: nextDetails,
+        };
+      });
+    } catch (error) {
+      set({
+        statusMessage: error instanceof Error ? error.message : "Failed to load agent sessions",
+      });
+    }
+  },
+  async loadSessionDetail(sessionId) {
+    const result = await getAgentSessionDetail(sessionId);
+    const detail: AgentSessionDetail = {
+      ...result.detail,
+      messages: result.detail.messages.map((message) => ({
+        ...message,
+        isOptimistic: false,
+      })),
+    };
+
     set((state) => ({
-      mode,
-      ...resetRuntimeState(),
-      serviceConfig: state.serviceConfig,
-      statusMessage:
-        state.mode === mode ? state.statusMessage : "Mode changed, next send will start a new session",
+      sessionSummaries: syncSummary(state.sessionSummaries, detail.session),
+      sessionDetailsById: {
+        ...state.sessionDetailsById,
+        [sessionId]: detail,
+      },
+      ...(state.activeSessionId === sessionId ? mirrorFromDetail(detail, state) : {}),
     }));
   },
-  setSafetyLevel(safetyLevel) {
-    set((state) => ({
-      safetyLevel,
-      ...resetRuntimeState(),
-      serviceConfig: state.serviceConfig,
-      statusMessage:
-        state.safetyLevel === safetyLevel
-          ? state.statusMessage
-          : "Safety level changed, next send will start a new session",
+  async initializeSessionState() {
+    await get().loadSessions();
+    await get().createNewSession();
+  },
+  async createNewSession() {
+    const state = get();
+    const result = await createAgentSession({
+      mode: state.mode,
+      safetyLevel: state.safetyLevel,
+    });
+
+    const detail = emptyDetail(result.session);
+    set((current) => ({
+      activeSessionId: result.session.id,
+      sessionSummaries: syncSummary(current.sessionSummaries, result.session),
+      sessionDetailsById: {
+        ...current.sessionDetailsById,
+        [result.session.id]: detail,
+      },
+      ...mirrorFromDetail(detail, current),
+      runStatus: FALLBACK_RUN_STATUS,
+      pendingAssistantState: null,
+      activePhaseSummary: null,
+      statusMessage: current.statusMessage,
     }));
+
+    for (const event of result.events) {
+      get().applyIncomingEvent(event);
+    }
+  },
+  async setActiveSession(sessionId) {
+    const state = get();
+    if (state.activeSessionId === sessionId) {
+      return;
+    }
+
+    if (!state.sessionDetailsById[sessionId] || state.sessionDetailsById[sessionId].messages.length === 0) {
+      await get().loadSessionDetail(sessionId);
+    }
+
+    const nextState = get();
+    const detail = nextState.sessionDetailsById[sessionId];
+    if (!detail) {
+      return;
+    }
+
+    set((current) => ({
+      activeSessionId: sessionId,
+      ...mirrorFromDetail(detail, current),
+      runStatus: detail.timeline.runs[0]?.status ?? "idle",
+      pendingAssistantState: null,
+      activePhaseSummary: null,
+      isSubmitting: false,
+      draftAttachments: current.draftAttachments,
+      draftPrompt: current.draftPrompt,
+    }));
+  },
+  setMode(mode) {
+    set((state) => {
+      return {
+        mode,
+        ...syncActiveSessionDraft(state, {
+          draftMode: mode,
+          updatedAt: nowIso(),
+        }),
+      };
+    });
+  },
+  setSafetyLevel(safetyLevel) {
+    set((state) => {
+      return {
+        safetyLevel,
+        ...syncActiveSessionDraft(state, {
+          draftSafetyLevel: safetyLevel,
+          updatedAt: nowIso(),
+        }),
+      };
+    });
   },
   setDraftPrompt(prompt) {
     set({ draftPrompt: prompt });
   },
   async submitDraftMessage() {
-    const state = get();
+    let state = get();
     const content = state.draftPrompt.trim();
     const activeRun =
       state.timeline.activeRunId != null
@@ -308,6 +527,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
     if (!content || state.isSubmitting || !isRunTerminal(activeRun?.status ?? state.runStatus)) {
       return;
+    }
+
+    if (!state.session) {
+      await get().createNewSession();
+      state = get();
     }
 
     const createdAt = nowIso();
@@ -327,38 +551,46 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     };
 
     try {
-      set({
-        messages: upsertMessage(state.messages, optimisticMessage),
-        draftPrompt: "",
-        draftAttachments: [],
-        isSubmitting: true,
-        pendingAssistantState: {
-          userMessageId: optimisticMessageId,
-          runId: null,
-          phase: "sending",
-          detail: null,
-          createdAt,
-        },
-        activePhaseSummary: "sending",
-        statusMessage: null,
+      set((current) => {
+        const activeSessionId = current.activeSessionId;
+        const nextDetails = { ...current.sessionDetailsById };
+        if (activeSessionId && current.session) {
+          const currentDetail =
+            nextDetails[activeSessionId] ?? buildDetailFromState(current, current.session);
+          nextDetails[activeSessionId] = {
+            ...currentDetail,
+            messages: upsertMessage(currentDetail.messages, optimisticMessage),
+          };
+        }
+
+        return {
+          sessionDetailsById: nextDetails,
+          messages: upsertMessage(current.messages, optimisticMessage),
+          draftPrompt: "",
+          draftAttachments: [],
+          isSubmitting: true,
+          pendingAssistantState: {
+            userMessageId: optimisticMessageId,
+            runId: null,
+            phase: "sending",
+            detail: null,
+            createdAt,
+          },
+          activePhaseSummary: "sending",
+          statusMessage: null,
+        };
       });
 
-      let session = state.session;
+      const session = get().session;
       if (!session) {
-        const sessionResult = await createAgentSession({
-          mode: state.mode,
-          safetyLevel: state.safetyLevel,
-        });
-        session = sessionResult.session;
-        set({ session });
-        for (const event of sessionResult.events) {
-          get().applyIncomingEvent(event);
-        }
+        throw new Error("Failed to create agent session");
       }
 
       await streamAgentMessage({
         sessionId: session.id,
         content,
+        mode: get().mode,
+        safetyLevel: get().safetyLevel,
         attachments: attachmentsSnapshot,
         onEvent: (event) => {
           get().applyIncomingEvent(event);
@@ -401,7 +633,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }));
   },
   async resolveApproval(requestId, outcome) {
-    const sessionId = get().session?.id;
+    const sessionId = get().activeSessionId;
     if (!sessionId) {
       return;
     }
@@ -446,14 +678,78 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const incoming = event as AgentEvent;
 
     set((state) => {
-      if (incoming.type === "session.start") {
-        return {
+      const nextDetails = { ...state.sessionDetailsById };
+      const baseSession =
+        (incoming.type === "session.start" ? incoming.payload.session : state.session) ??
+        state.sessionSummaries.find((item) => item.id === incoming.sessionId) ??
+        null;
+
+      if (!nextDetails[incoming.sessionId]) {
+        if (baseSession) {
+          nextDetails[incoming.sessionId] =
+            state.activeSessionId === incoming.sessionId
+              ? buildDetailFromState(state, baseSession)
+              : emptyDetail(baseSession);
+        } else {
+          const fallbackSession: AgentSessionSummary = {
+            id: incoming.sessionId,
+            createdAt: incoming.timestamp,
+            updatedAt: incoming.timestamp,
+            title: "Conversation",
+            lastMessagePreview: null,
+            draftMode: state.mode,
+            draftSafetyLevel: state.safetyLevel,
+            workspaceId: null,
+          };
+          nextDetails[incoming.sessionId] =
+            state.activeSessionId === incoming.sessionId
+              ? buildDetailFromState(state, fallbackSession)
+              : emptyDetail(fallbackSession);
+        }
+      }
+
+      const targetDetail = nextDetails[incoming.sessionId];
+      if (targetDetail && incoming.type === "session.start") {
+        nextDetails[incoming.sessionId] = {
+          ...targetDetail,
           session: incoming.payload.session,
-          mode: incoming.payload.session.mode,
-          safetyLevel: incoming.payload.session.safetyLevel,
-          transportFlavor: "contract" as const,
-          statusMessage: state.statusMessage,
         };
+      }
+
+      const detail = nextDetails[incoming.sessionId] ?? null;
+      const activeSessionId = state.activeSessionId ?? incoming.sessionId;
+
+      const updateActive = (updatedDetail: AgentSessionDetail | null, extra: Partial<AgentStore> = {}) => ({
+        sessionSummaries:
+          updatedDetail != null
+            ? syncSummary(state.sessionSummaries, updatedDetail.session)
+            : state.sessionSummaries,
+        sessionDetailsById:
+          updatedDetail != null
+            ? {
+                ...nextDetails,
+                [updatedDetail.session.id]: updatedDetail,
+              }
+            : nextDetails,
+        activeSessionId,
+        ...(updatedDetail && activeSessionId === updatedDetail.session.id
+          ? mirrorFromDetail(updatedDetail, state)
+          : {}),
+        ...extra,
+      });
+
+      if (incoming.type === "session.start") {
+        const updatedDetail = {
+          ...(detail ?? emptyDetail(incoming.payload.session)),
+          session: incoming.payload.session,
+        };
+        return updateActive(updatedDetail, {
+          transportFlavor: "contract",
+        });
+      }
+
+      if (!detail) {
+        return state;
       }
 
       if (incoming.type === "session.message") {
@@ -470,8 +766,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           isOptimistic: false,
         };
 
-        const reconciledMessages = upsertMessage(state.messages, nextMessage);
-        const matchingOptimistic = state.messages.find(
+        const reconciledMessages = upsertMessage(detail.messages, nextMessage);
+        const matchingOptimistic = detail.messages.find(
           (item) =>
             item.isOptimistic &&
             item.role === nextMessage.role &&
@@ -481,108 +777,135 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             attachmentsMatch(item.attachments, nextMessage.attachments),
         );
 
-        return {
-          messages: reconciledMessages,
-          pendingAssistantState:
-            matchingOptimistic && state.pendingAssistantState?.userMessageId === matchingOptimistic.id
-              ? {
-                  ...state.pendingAssistantState,
-                  userMessageId: nextMessage.id,
-                }
-              : state.pendingAssistantState,
-          transportFlavor: "contract" as const,
-        };
+        return updateActive(
+          {
+            ...detail,
+            session: {
+              ...detail.session,
+              updatedAt: incoming.timestamp,
+              lastMessagePreview: incoming.payload.content,
+              draftMode: incoming.payload.mode,
+              draftSafetyLevel: incoming.payload.safetyLevel,
+            },
+            messages: reconciledMessages,
+          },
+          {
+            pendingAssistantState:
+              matchingOptimistic && state.pendingAssistantState?.userMessageId === matchingOptimistic.id
+                ? {
+                    ...state.pendingAssistantState,
+                    userMessageId: nextMessage.id,
+                  }
+                : state.pendingAssistantState,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "run.started") {
         const run = incoming.payload.run;
-        const currentRun = state.timeline.runs.find((item) => item.id === run.id);
+        const currentRun = detail.timeline.runs.find((item) => item.id === run.id);
         const phase = getPendingPhaseFromRunStatus(run.status);
-        return {
-          timeline: {
-            ...state.timeline,
-            activeRunId: run.id,
-            runs: upsertRun(state.timeline.runs, {
-              ...(currentRun ?? {
+        return updateActive(
+          {
+            ...detail,
+            timeline: {
+              ...detail.timeline,
+              activeRunId: run.id,
+              runs: upsertRun(detail.timeline.runs, {
+                ...(currentRun ?? {
+                  ...run,
+                  steps: [],
+                }),
                 ...run,
-                steps: [],
+                steps: currentRun?.steps ?? [],
               }),
-              ...run,
-              steps: currentRun?.steps ?? [],
-            }),
+            },
           },
-          runStatus: run.status,
-          pendingAssistantState:
-            state.pendingAssistantState == null
-              ? null
-              : {
-                  ...state.pendingAssistantState,
-                  runId: run.id,
-                  phase: phase ?? state.pendingAssistantState.phase,
-                },
-          activePhaseSummary: phase ?? state.activePhaseSummary,
-          transportFlavor: "contract" as const,
-        };
+          {
+            runStatus: run.status,
+            pendingAssistantState:
+              state.pendingAssistantState == null
+                ? null
+                : {
+                    ...state.pendingAssistantState,
+                    runId: run.id,
+                    phase: phase ?? state.pendingAssistantState.phase,
+                  },
+            activePhaseSummary: phase ?? state.activePhaseSummary,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "run.status") {
         const nextRuns =
           incoming.runId == null
-            ? state.timeline.runs
-            : state.timeline.runs.map((run) =>
+            ? detail.timeline.runs
+            : detail.timeline.runs.map((run) =>
                 run.id === incoming.runId ? { ...run, status: incoming.payload.status } : run,
               );
         const phase = getPendingPhaseFromRunStatus(incoming.payload.status);
-        return {
-          timeline: {
-            ...state.timeline,
-            runs: nextRuns,
+        return updateActive(
+          {
+            ...detail,
+            timeline: {
+              ...detail.timeline,
+              runs: nextRuns,
+            },
           },
-          runStatus: incoming.payload.status,
-          statusMessage:
-            incoming.payload.status === "failed" || incoming.payload.status === "cancelled"
-              ? incoming.payload.message ?? state.statusMessage
-              : state.statusMessage,
-          pendingAssistantState:
-            phase == null || state.pendingAssistantState == null
-              ? state.pendingAssistantState
-              : {
-                  ...state.pendingAssistantState,
-                  runId: incoming.runId ?? state.pendingAssistantState.runId,
-                  phase,
-                  detail: incoming.payload.message ?? state.pendingAssistantState.detail,
-                },
-          activePhaseSummary: phase ?? state.activePhaseSummary,
-          transportFlavor: "contract" as const,
-        };
+          {
+            runStatus: incoming.payload.status,
+            statusMessage:
+              incoming.payload.status === "failed" || incoming.payload.status === "cancelled"
+                ? incoming.payload.message ?? state.statusMessage
+                : state.statusMessage,
+            pendingAssistantState:
+              phase == null || state.pendingAssistantState == null
+                ? state.pendingAssistantState
+                : {
+                    ...state.pendingAssistantState,
+                    runId: incoming.runId ?? state.pendingAssistantState.runId,
+                    phase,
+                    detail: incoming.payload.message ?? state.pendingAssistantState.detail,
+                  },
+            activePhaseSummary: phase ?? state.activePhaseSummary,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "run.completed") {
         const run = incoming.payload.run;
-        const currentRun = state.timeline.runs.find((item) => item.id === run.id);
-        return {
-          timeline: {
-            ...state.timeline,
-            activeRunId: run.id,
-            runs: upsertRun(state.timeline.runs, {
-              ...(currentRun ?? {
+        const currentRun = detail.timeline.runs.find((item) => item.id === run.id);
+        return updateActive(
+          {
+            ...detail,
+            timeline: {
+              ...detail.timeline,
+              activeRunId: run.id,
+              runs: upsertRun(detail.timeline.runs, {
+                ...(currentRun ?? {
+                  ...run,
+                  steps: [],
+                }),
                 ...run,
-                steps: [],
+                steps: currentRun?.steps ?? [],
               }),
-              ...run,
-              steps: currentRun?.steps ?? [],
-            }),
+            },
           },
-          runStatus: run.status,
-          isSubmitting: false,
-          pendingAssistantState: null,
-          activePhaseSummary: null,
-          transportFlavor: "contract" as const,
-        };
+          {
+            runStatus: run.status,
+            isSubmitting: false,
+            pendingAssistantState: null,
+            activePhaseSummary: null,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "assistant.delta") {
-        const existing = state.messages.find((item) => item.id === incoming.payload.messageId);
+        const existing = detail.messages.find((item) => item.id === incoming.payload.messageId);
         const next = existing
           ? {
               ...existing,
@@ -601,21 +924,26 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
               isStreaming: true,
             };
 
-        return {
-          messages: upsertMessage(state.messages, next),
-          isSubmitting: false,
-          pendingAssistantState: null,
-          activePhaseSummary: null,
-          transportFlavor: "contract" as const,
-        };
+        return updateActive(
+          {
+            ...detail,
+            messages: upsertMessage(detail.messages, next),
+          },
+          {
+            isSubmitting: false,
+            pendingAssistantState: null,
+            activePhaseSummary: null,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "assistant.final") {
-        const existing = state.messages.find((item) => item.id === incoming.payload.messageId);
+        const existing = detail.messages.find((item) => item.id === incoming.payload.messageId);
         const currentRun =
           incoming.runId == null
             ? null
-            : state.timeline.runs.find((item) => item.id === incoming.runId) ?? null;
+            : detail.timeline.runs.find((item) => item.id === incoming.runId) ?? null;
         const next = existing
           ? {
               ...existing,
@@ -634,27 +962,32 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
               isStreaming: false,
             };
 
-        return {
-          messages: upsertMessage(state.messages, next),
-          transportFlavor: "contract" as const,
-          isSubmitting: false,
-          pendingAssistantState: null,
-          activePhaseSummary: null,
-          statusMessage: null,
-          runStatus: incoming.runId == null ? state.runStatus : currentRun?.status ?? state.runStatus,
-        };
+        return updateActive(
+          {
+            ...detail,
+            messages: upsertMessage(detail.messages, next),
+          },
+          {
+            transportFlavor: "contract",
+            isSubmitting: false,
+            pendingAssistantState: null,
+            activePhaseSummary: null,
+            statusMessage: null,
+            runStatus: incoming.runId == null ? state.runStatus : currentRun?.status ?? state.runStatus,
+          },
+        );
       }
 
       if (incoming.type === "plan.ready") {
         const plan: ExecutionPlanDto = incoming.payload.plan;
-        const currentRun = state.timeline.runs.find((item) => item.id === plan.runId);
+        const currentRun = detail.timeline.runs.find((item) => item.id === plan.runId);
         const nextRun: AgentTimelineRun =
           currentRun ?? {
             id: plan.runId,
             sessionId: incoming.sessionId,
             mode: state.mode,
             safetyLevel: state.safetyLevel,
-            capabilityId: plan.capabilityId,
+            capabilityId: null,
             status: "planning",
             goal: plan.goal,
             createdAt: incoming.timestamp,
@@ -663,29 +996,34 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             steps: [],
           };
 
-        return {
-          timeline: {
-            activeRunId: plan.runId,
-            latestPlan: plan,
-            runs: upsertRun(state.timeline.runs, {
-              ...nextRun,
-              capabilityId: plan.capabilityId ?? nextRun.capabilityId,
-              goal: plan.goal,
-              steps: plan.steps,
-            }),
+        return updateActive(
+          {
+            ...detail,
+            timeline: {
+              activeRunId: plan.runId,
+              latestPlan: plan,
+              runs: upsertRun(detail.timeline.runs, {
+                ...nextRun,
+                capabilityId: plan.capabilityId ?? nextRun.capabilityId,
+                goal: plan.goal,
+                steps: plan.steps,
+              }),
+            },
           },
-          pendingAssistantState:
-            state.pendingAssistantState == null
-              ? null
-              : {
-                  ...state.pendingAssistantState,
-                  runId: plan.runId,
-                  phase: "planning",
-                  detail: plan.steps[0]?.title ?? plan.goal,
-                },
-          activePhaseSummary: state.pendingAssistantState ? "planning" : state.activePhaseSummary,
-          transportFlavor: "contract" as const,
-        };
+          {
+            pendingAssistantState:
+              state.pendingAssistantState == null
+                ? null
+                : {
+                    ...state.pendingAssistantState,
+                    runId: plan.runId,
+                    phase: "planning",
+                    detail: plan.steps[0]?.title ?? plan.goal,
+                  },
+            activePhaseSummary: state.pendingAssistantState ? "planning" : state.activePhaseSummary,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (
@@ -694,7 +1032,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         incoming.type === "plan.step.failed"
       ) {
         const step: ExecutionStepDto = incoming.payload.step;
-        const run = state.timeline.runs.find((item) => item.id === step.runId);
+        const run = detail.timeline.runs.find((item) => item.id === step.runId);
         const fallbackRun: AgentTimelineRun = {
           id: step.runId,
           sessionId: incoming.sessionId,
@@ -734,56 +1072,64 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
               ? "preparing"
               : "planning";
 
-        return {
-          timeline: {
-            ...state.timeline,
-            activeRunId: step.runId,
-            runs: upsertRun(state.timeline.runs, {
-              ...baseRun,
-              status: nextRunStatus,
-              completedAt: nextRunStatus === "completed" ? nowIso() : null,
-              steps: nextSteps,
-            }),
+        return updateActive(
+          {
+            ...detail,
+            timeline: {
+              ...detail.timeline,
+              activeRunId: step.runId,
+              runs: upsertRun(detail.timeline.runs, {
+                ...baseRun,
+                status: nextRunStatus,
+                completedAt: nextRunStatus === "completed" ? nowIso() : null,
+                steps: nextSteps,
+              }),
+            },
           },
-          runStatus:
-            incoming.runId == null || state.timeline.activeRunId !== incoming.runId
-              ? state.runStatus
-              : mapStatusToRunState(state.runStatus === "idle" ? nextRunStatus : state.runStatus),
-          pendingAssistantState:
-            phase == null || state.pendingAssistantState == null
-              ? state.pendingAssistantState
-              : {
-                  ...state.pendingAssistantState,
-                  runId: step.runId,
-                  phase,
-                  detail: step.title,
-                },
-          activePhaseSummary: phase ?? state.activePhaseSummary,
-          transportFlavor: "contract" as const,
-        };
+          {
+            runStatus:
+              incoming.runId == null || detail.timeline.activeRunId !== incoming.runId
+                ? state.runStatus
+                : mapStatusToRunState(state.runStatus === "idle" ? nextRunStatus : state.runStatus),
+            pendingAssistantState:
+              phase == null || state.pendingAssistantState == null
+                ? state.pendingAssistantState
+                : {
+                    ...state.pendingAssistantState,
+                    runId: step.runId,
+                    phase,
+                    detail: step.title,
+                  },
+            activePhaseSummary: phase ?? state.activePhaseSummary,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "approval.requested") {
         const request: ApprovalRequestDto = incoming.payload.request;
-        const existing = state.approvals.some((item) => item.id === request.id);
-
-        return {
-          approvals: existing ? state.approvals : [request, ...state.approvals],
-          isSubmitting: false,
-          pendingAssistantState:
-            state.pendingAssistantState == null
-              ? null
-              : {
-                  ...state.pendingAssistantState,
-                  runId: request.runId,
-                  phase: "waiting_for_approval",
-                  detail: request.actionSummary ?? request.title,
-                },
-          activePhaseSummary: state.pendingAssistantState
-            ? "waiting_for_approval"
-            : state.activePhaseSummary,
-          transportFlavor: "contract" as const,
-        };
+        return updateActive(
+          {
+            ...detail,
+            approvals: upsertApproval(detail.approvals, request),
+          },
+          {
+            isSubmitting: false,
+            pendingAssistantState:
+              state.pendingAssistantState == null
+                ? null
+                : {
+                    ...state.pendingAssistantState,
+                    runId: request.runId,
+                    phase: "waiting_for_approval",
+                    detail: request.actionSummary ?? request.title,
+                  },
+            activePhaseSummary: state.pendingAssistantState
+              ? "waiting_for_approval"
+              : state.activePhaseSummary,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "approval.resolved") {
@@ -796,63 +1142,75 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         const currentRun =
           incoming.runId == null
             ? null
-            : state.timeline.runs.find((item) => item.id === incoming.runId) ?? null;
+            : detail.timeline.runs.find((item) => item.id === incoming.runId) ?? null;
 
-        return {
-          approvals: state.approvals.filter((item) => item.id !== incoming.payload.requestId),
-          approvalHistory: [resolution, ...state.approvalHistory],
-          statusMessage:
-            incoming.payload.outcome === "approved"
-              ? null
-              : incoming.payload.outcome === "rejected"
-                ? "Approval rejected"
-                : "Approval expired",
-          pendingAssistantState:
-            incoming.payload.outcome === "approved" && state.pendingAssistantState != null
-              ? {
-                  ...state.pendingAssistantState,
-                  phase: "preparing",
-                  detail: null,
-                }
-              : null,
-          activePhaseSummary:
-            incoming.payload.outcome === "approved" && state.pendingAssistantState != null
-              ? "preparing"
-              : null,
-          transportFlavor: "contract" as const,
-          runStatus: currentRun?.status ?? state.runStatus,
-        };
+        return updateActive(
+          {
+            ...detail,
+            approvals: detail.approvals.filter((item) => item.id !== incoming.payload.requestId),
+            approvalHistory: [resolution, ...detail.approvalHistory],
+          },
+          {
+            statusMessage:
+              incoming.payload.outcome === "approved"
+                ? null
+                : incoming.payload.outcome === "rejected"
+                  ? "Approval rejected"
+                  : "Approval expired",
+            pendingAssistantState:
+              incoming.payload.outcome === "approved" && state.pendingAssistantState != null
+                ? {
+                    ...state.pendingAssistantState,
+                    phase: "preparing",
+                    detail: null,
+                  }
+                : null,
+            activePhaseSummary:
+              incoming.payload.outcome === "approved" && state.pendingAssistantState != null
+                ? "preparing"
+                : null,
+            transportFlavor: "contract",
+            runStatus: currentRun?.status ?? state.runStatus,
+          },
+        );
       }
 
       if (incoming.type === "artifact.ready") {
-        const artifact = incoming.payload.artifact;
-        const hasArtifact = state.artifacts.some((item) => item.id === artifact.id);
-
-        return {
-          artifacts: hasArtifact ? state.artifacts : [artifact, ...state.artifacts],
-          transportFlavor: "contract" as const,
-        };
+        return updateActive(
+          {
+            ...detail,
+            artifacts: upsertArtifact(detail.artifacts, incoming.payload.artifact),
+          },
+          {
+            transportFlavor: "contract",
+          },
+        );
       }
 
       if (incoming.type === "service.error") {
         const nextRuns =
           incoming.runId == null
-            ? state.timeline.runs
-            : state.timeline.runs.map((run) =>
+            ? detail.timeline.runs
+            : detail.timeline.runs.map((run) =>
                 run.id === incoming.runId ? { ...run, status: "failed" as const } : run,
               );
-        return {
-          timeline: {
-            ...state.timeline,
-            runs: nextRuns,
+        return updateActive(
+          {
+            ...detail,
+            timeline: {
+              ...detail.timeline,
+              runs: nextRuns,
+            },
           },
-          runStatus: incoming.runId == null ? state.runStatus : "failed",
-          isSubmitting: false,
-          pendingAssistantState: null,
-          activePhaseSummary: null,
-          statusMessage: incoming.payload.message,
-          transportFlavor: "contract" as const,
-        };
+          {
+            runStatus: incoming.runId == null ? state.runStatus : "failed",
+            isSubmitting: false,
+            pendingAssistantState: null,
+            activePhaseSummary: null,
+            statusMessage: incoming.payload.message,
+            transportFlavor: "contract",
+          },
+        );
       }
 
       return state;

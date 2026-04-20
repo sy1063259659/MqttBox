@@ -4,8 +4,10 @@ import type {
   CapabilityDescriptor,
   AgentEvent,
   AgentSafetyLevel,
+  AgentSessionDetailDto,
   AgentSessionDto,
   AgentSessionMode,
+  ToolDescriptor,
 } from "@agent-contracts";
 import type { AgentSettingsDto } from "@/services/tauri";
 
@@ -42,6 +44,7 @@ export interface AgentServiceHealthDto {
   service: string;
   transport: string;
   capabilities: CapabilityDescriptor[];
+  tools: ToolDescriptor[];
   memories: number;
   deepagentsRuntime: string;
   model?: {
@@ -50,7 +53,16 @@ export interface AgentServiceHealthDto {
     model: string;
     baseUrl: string;
     enabled: boolean;
+    protocol: "responses" | "chat_completions";
   };
+}
+
+interface AgentSessionListResponse {
+  sessions: AgentSessionDto[];
+}
+
+interface AgentSessionDetailResponse {
+  detail: AgentSessionDetailDto;
 }
 
 export interface AgentServiceRequestError extends Error {
@@ -141,12 +153,16 @@ export async function createAgentSession(input: {
 export async function sendAgentMessage(input: {
   sessionId: string;
   content: string;
+  mode: AgentSessionMode;
+  safetyLevel: AgentSafetyLevel;
   attachments: AgentAttachmentDto[];
 }) {
   return requestJson<AgentMessageResponse>(`/sessions/${encodeURIComponent(input.sessionId)}/messages`, {
     method: "POST",
     body: JSON.stringify({
       content: input.content,
+      mode: input.mode,
+      safetyLevel: input.safetyLevel,
       attachments: input.attachments,
     }),
   });
@@ -155,6 +171,8 @@ export async function sendAgentMessage(input: {
 export async function streamAgentMessage(input: {
   sessionId: string;
   content: string;
+  mode: AgentSessionMode;
+  safetyLevel: AgentSafetyLevel;
   attachments: AgentAttachmentDto[];
   onEvent: (event: AgentEvent) => void;
 }) {
@@ -171,6 +189,8 @@ export async function streamAgentMessage(input: {
         },
         body: JSON.stringify({
           content: input.content,
+          mode: input.mode,
+          safetyLevel: input.safetyLevel,
           attachments: input.attachments,
         }),
       },
@@ -283,6 +303,19 @@ export async function syncAgentServiceConfig(settings: AgentSettingsDto) {
       apiKey: settings.apiKey,
       model: settings.model,
       enabled: settings.enabled,
+      protocol: settings.protocol,
     }),
+  });
+}
+
+export async function listAgentSessions() {
+  return requestJson<AgentSessionListResponse>("/sessions", {
+    method: "GET",
+  });
+}
+
+export async function getAgentSessionDetail(sessionId: string) {
+  return requestJson<AgentSessionDetailResponse>(`/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "GET",
   });
 }
